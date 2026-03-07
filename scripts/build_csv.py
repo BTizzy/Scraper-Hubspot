@@ -1,0 +1,157 @@
+"""build_csv.py
+
+Apply quality gates and build a HubSpot-ready CSV.
+
+Input:  contacts_scored_qualified.csv (or any CSV with contact data)
+Output: hubspot_import.csv with exact headers for HubSpot mapping
+
+Quality gates:
+  - Must have email + company
+  - Generic emails (info@, hello@, etc.) → REJECT
+  - Must have MX pass OR verification_score containing PASS
+  - If signal_tag is blank, still include but tag as 'manual_review'
+  - Must be able to derive a first name
+
+This version aligns column names with the upstream pipeline:
+  email, first_name, last_name, company, title, domain, signal_tag, source, etc.
+"""
+import csv
+import argparse
+
+HUBSPOT_HEADERS = ['Email', 'First Name', 'Last Name', 'Company', 'Job Title',
+                   'Phone', 'Website', 'City', 'Signal Tag', 'LinkedIn URL', 'Notes']
+
+GENERIC_LOCAL = ['info', 'hello', 'contact', 'admin', 'support', 'office',
+                 'team', 'sales', 'noreply', 'mail', 'billing', 'hr',
+                 'jobs', 'careers', 'press', 'media', 'marketing',
+                 'webmaster', 'postmaster', 'abuse', 'security',
+                 'reception', 'frontdesk', 'general', 'enquiries',
+                 'inquiries', 'feedback', 'help', 'service', 'accounts']
+
+
+def split_name(first_name, last_name, email):
+    """Get first/last from explicit columns, then fall back to email local part."""
+    first = (first_name or '').strip()
+    last = (last_name or '').strip()
+    if first:
+        return first.capitalize(), last.capitalize() if last else ''
+    # Fallback: parse email local part
+    try:
+        local = email.split('@', 1)[0]
+        for sep in ['.', '_', '-']:
+            if sep in local:
+                parts = local.split(sep)
+                return parts[0].capitalize(), parts[-1].capitalize()
+        return local.capitalize(), ''
+    except Exception:
+        return '', ''
+
+
+def is_generic(email):
+    try:
+        local = email.split('@', 1)[0].lower()
+        return local in GENERIC_LOCAL
+    except Exception:
+        return True
+
+
+def passes_quality(row):
+    email = (row.get('email') or row.get('Email') or '').strip()
+    company = (row.get('company') or row.get('Company') or '').strip()
+    mx = (row.get('mx_pass') or '').upper()
+    vscore = (row.get('verification_score') or '').upper()
+
+    if not email:
+        return False, 'Missing email'
+    if not company:
+        return False, 'Missing company'
+    if is_generic(email):
+        return False, 'Generic email'
+    # Accept if MX passed OR verification_score says PASS
+    if mx != 'TRUE' and 'PASS' not in vscore:
+        return False, 'MX check failed'
+    return True, ''
+
+
+def build(input_csv, output_csv, reject_csv):
+    try:
+        with open(input_csv, newline='', encoding='utf-8') as fin:
+            reader = csv.DictReader(fin)
+            rows = list(reader)
+            input_fields = reader.fieldnames or []
+    except FileNotFoundError:
+        print(f"\n⚠ Input file not found: {input_csv}")
+        print(f"  (This usually means no contacts passed the scoring threshold)")
+        # Create empty HubSpot file with headers so downstream doesn't break
+        with open(output_csv, 'w', newline='', encoding='utf-8') as fout:
+            writer = csv.DictWriter(fout, fieldnames=HUBSPOT_HEADERS)
+            writer.writeheader()
+        print(f"\n✅ HubSpot CSV built:")
+        print(f"  Passed: 0 contacts → {output_csv}")
+        print(f"  Rejected: 0 contacts → {reject_csv}")
+        return
+
+    passed = 0
+    rejected = 0
+
+    with open(output_csv, 'w', newline='', encoding='utf-8') as fout, \
+         open(reject_csv, 'w', newline='', encoding='utf-8') as frej:
+        writer = csv.DictWriter(fout, fieldnames=HUBSPOT_HEADERS)
+        rej_fields = list(input_fields) + ['reject_reason']
+        rej_writer = csv.DictWriter(frej, fieldnames=rej_fields, extrasaction='ignore')
+        writer.writeheader()
+        rej_writer.writeheader()
+
+        for row in rows:
+            ok, reason = passes_quality(row)
+            if not ok:
+                row['reject_reason'] = reason
+                rej_writer.writerow(row)
+                rejected += 1
+                continue
+
+            email = (row.get('email') or row.get('Email') or '').strip()
+            first_name = row.get('first_name') or row.get('First Name') or ''
+            last_name = row.get('last_name') or row.get('Last Name') or ''
+            first, last = split_name(first_name, last_name, email)
+
+            if not first:
+                row['reject_reason'] = 'Missing first name'
+                rej_writer.writerow(row)
+                rejected += 1
+                continue
+
+            signal = row.get('signal_tag') or row.get('Signal Tag') or ''
+            domain = row.get('domain') or row.get('website') or row.get('Website') or ''
+
+            out = {
+                'Email': email,
+                'First Name': first,
+                'Last Name': last,
+                'Company': row.get('company') or row.get('Company') or '',
+                'Job Title': row.get('title') or row.get('job_title') or row.get('Job Title') or '',
+                'Phone': row.get('phone') or row.get('Phone') or '',
+                'Website': domain,
+                'City': row.get('city') or row.get('City') or 'Seattle',
+                'Signal Tag': signal if signal else 'manual_review',
+                'LinkedIn URL': row.get('linkedin_url') or row.get('LinkedIn URL') or '',
+                'Notes': row.get('notes') or row.get('Notes') or
+                         row.get('score_breakdown') or '',
+            }
+            writer.writerow(out)
+            passed += 1
+
+    print(f"\n✅ HubSpot CSV built:")
+    print(f"  Passed: {passed} contacts → {output_csv}")
+    print(f"  Rejected: {rejected} contacts → {reject_csv}")
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', '-i', required=True)
+    parser.add_argument('--output', '-o', required=True)
+    parser.add_argument('--rejects', '-r', default='rejects.csv')
+    args = parser.parse_args()
+    build(args.input, args.output, args.rejects)
+
+if __name__ == '__main__':
+    main()
