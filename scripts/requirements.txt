@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+dnspython
+pandas
+python-dateutil
+theharvester
+python-whois
