@@ -76,19 +76,21 @@ def days_since(date_str: str) -> float:
 def verification_score(mx_pass: bool, smtp_ok: str = '', catch_all: str = '') -> float:
     """
     Score based on how deeply the email was verified.
-    MX only = 0.3, MX + SMTP accept = 0.7, MX + SMTP + not catch-all = 1.0
+    MX only = 0.5, MX + SMTP accept = 0.75, MX + SMTP + not catch-all = 1.0
+    Raised MX-only from 0.3→0.5 because in free pipeline mode (no SMTP),
+    MX is our strongest verification signal and most small-biz domains pass.
     """
     score = 0.0
     smtp_norm = str(smtp_ok or '').strip().upper()
     catch_norm = str(catch_all or '').strip().upper()
     if mx_pass:
-        score = 0.3
+        score = 0.5
         if smtp_norm in ('TRUE', 'ACCEPT'):
-            score = 0.7
+            score = 0.75
             if catch_norm == 'FALSE':
                 score = 1.0  # best: SMTP accepted AND domain is NOT catch-all
             elif catch_norm == 'TRUE':
-                score = 0.5  # catch-all dampens confidence
+                score = 0.55  # catch-all dampens confidence
     return score
 
 
