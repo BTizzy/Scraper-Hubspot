@@ -1,0 +1,32 @@
+{
+  "coverage_day1": 2,
+  "coverage_day2": 5,
+  "total": 5,
+  "report": [
+    {
+      "company": "Emerald City Roofing LLC",
+      "day1_domain": "",
+      "day2_domain": "emeraldcityroofing.com"
+    },
+    {
+      "company": "Pacific Northwest Electric Inc",
+      "day1_domain": "pacificnorthwestelectric.com",
+      "day2_domain": "pacificnorthwestelectric.com"
+    },
+    {
+      "company": "Cascade Building Services LLC",
+      "day1_domain": "",
+      "day2_domain": "cascadebuilding.com"
+    },
+    {
+      "company": "Sound Transit Staffing Group LLC",
+      "day1_domain": "",
+      "day2_domain": "soundstaffing.com"
+    },
+    {
+      "company": "Puget Sound Plumbing Co",
+      "day1_domain": "pugetsoundplumbing.com",
+      "day2_domain": "pugetsoundplumbing.com"
+    }
+  ]
+}

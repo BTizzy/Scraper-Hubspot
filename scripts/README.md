@@ -93,6 +93,98 @@ python run_pipeline.py --sos sos_export.csv --skip-theharvester --skip-dorks --m
 python run_pipeline.py --sos sos_export.csv --dry-run
 ```
 
+### Daily Novel-List Runner
+
+Use the daily wrapper to avoid repeating the same companies/contacts across days.
+
+```bash
+# Daily run with cross-day state (recommended)
+python daily_run.py --sos sos_export.csv --smtp --min-level B
+
+# Optional: fast mode + custom output root
+python daily_run.py --sos sos_export.csv --skip-theharvester --skip-dorks --output-root daily_output
+```
+
+What it does:
+- Filters out companies already processed in earlier runs (state file)
+- Runs the normal pipeline on only novel companies
+- Filters HubSpot export to only novel contact emails
+- Writes date-stamped output folders for auditability
+
+State files created:
+- `state/seen_companies.csv`
+- `state/seen_emails.csv`
+
+### Daily Contract Runner (Real Active Emails)
+
+Use this when you need a fixed daily volume of real active emails that also meets
+the signal contract. It runs multiple pipeline batches in one day and stops only
+when targets are met or input is exhausted.
+
+```bash
+# Contract-driven run (requires SMTP for real active verification)
+python daily_contract_runner.py \
+    --sos sos_export.csv \
+    --smtp \
+    --batch-size 40 \
+    --max-batches 20 \
+    --state-dir state \
+    --output-root daily_output \
+    --run-name contract_day
+
+# Optional: override daily active target
+python daily_contract_runner.py --sos sos_export.csv --smtp --target-active-emails 60
+```
+
+### Multi-Source Input Pool Builder
+
+Build a larger daily input pool from multiple local CSVs plus web discovery,
+then feed it into the contract runner.
+
+```bash
+# Build a normalized pool (domain required by default)
+python build_input_pool.py \
+    --sos sos_export.csv \
+    --manual manual_companies.csv \
+    --exclude-state-dir state \
+    --max-runtime-minutes 90 \
+    --output input_pool.csv
+
+# Run contract flow from the pool
+python daily_contract_runner.py \
+    --input-pool input_pool.csv \
+    --smtp \
+    --batch-size 40 \
+    --max-batches 20
+```
+
+Main pool builder outputs:
+- `input_pool.csv`
+- `input_pool_report.json` (or `<output>_report.json`)
+
+Pool builder source modes in V1:
+- Registry/domain enrichment per company (`collect_companies` helpers)
+- Search discovery (broad public web results)
+- Jobs/news discovery (hiring and growth intent style queries)
+
+Useful flags:
+- `--disable-search-discovery`
+- `--disable-jobs-news-discovery`
+- `--disable-domain-enrichment`
+- `--allow-missing-domain` (disabled by default)
+
+Real active email criteria:
+- `confidence_level` is `A` or `B`
+- `smtp_ok` is `ACCEPT` (or `TRUE`)
+- `catch_all` is `FALSE`
+- `mx_pass` is `TRUE`
+
+Main outputs:
+- `daily_output/<date_run>/contacts_scored_consolidated.csv`
+- `daily_output/<date_run>/real_active_emails.csv`
+- `daily_output/<date_run>/hubspot_import.csv`
+- `daily_output/<date_run>/daily_contract_summary.json`
+
 ### Individual scripts
 
 ```bash

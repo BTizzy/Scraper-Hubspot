@@ -55,7 +55,7 @@ SIGNALS = {
     "active_lawsuit": {
         "priority": 100,
         "description": "Active civil litigation in King County — urgent HR/compliance pain",
-        "sources": ["courtlistener", "king_county_courts"],
+        "sources": ["courtlistener_v4", "duckduckgo_courtlistener_dork", "king_county_courts"],
     },
     "new_business": {
         "priority": 90,
@@ -65,7 +65,7 @@ SIGNALS = {
     "rebrand": {
         "priority": 85,
         "description": "Company name change or 'formerly known as' — new vendor selection window",
-        "sources": ["opencorporates", "website_copy"],
+        "sources": ["opencorporates_api", "opencorporates_html", "website_copy"],
     },
     "formation_with_employees": {
         "priority": 80,
@@ -75,12 +75,12 @@ SIGNALS = {
     "active_hiring": {
         "priority": 70,
         "description": "Open job postings in last 30 days — confirmed growth",
-        "sources": ["indeed", "linkedin_jobs"],
+        "sources": ["company_careers_page", "job_posting_heuristics"],
     },
     "website_refresh": {
         "priority": 50,
         "description": "Domain registered/redesigned recently — active investment in brand",
-        "sources": ["whois", "wayback_machine"],
+        "sources": ["whois", "http_last_modified"],
     },
 }
 
@@ -139,6 +139,35 @@ FAKE_FIRST_NAMES = [
 # ── Hunter.io / Skrapp.io free tier limits ─────────────────────────────────────
 HUNTER_FREE_SEARCHES = 25       # per month
 SKRAPP_FREE_CREDITS = 100       # per month
+
+# ── Daily Run Contract (hard gates) ───────────────────────────────────────────
+# Operational SLO for production list generation.
+# A run is considered successful only if all gates are met.
+DAILY_RUN_CONTRACT = {
+    "enabled": True,
+    "hard_fail": True,
+    "min_contacts_per_run": 50,
+    "min_unique_companies_per_run": 25,
+    "count_confidence_levels": ["A", "B"],
+    "required_signals": [
+        "active_lawsuit",
+        "new_business",
+        "rebrand",
+        "formation_with_employees",
+        "active_hiring",
+        "website_refresh",
+    ],
+    "min_unique_companies_per_signal": 3,
+}
+
+
+def get_daily_run_contract() -> dict:
+    """Return a defensive copy of the daily run gate contract."""
+    return {
+        **DAILY_RUN_CONTRACT,
+        "count_confidence_levels": list(DAILY_RUN_CONTRACT.get("count_confidence_levels", [])),
+        "required_signals": list(DAILY_RUN_CONTRACT.get("required_signals", [])),
+    }
 
 def get_signal_priority(tag: str) -> int:
     """Return priority weight for a signal tag, or 0 if unknown."""

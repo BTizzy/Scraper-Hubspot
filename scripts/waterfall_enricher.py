@@ -30,10 +30,14 @@ import re
 import subprocess
 import sys
 import time
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import requests
 from bs4 import BeautifulSoup
+
+from local_secrets import load_local_env
+
+load_local_env()
 
 from trillium_config import DM_TITLES, GENERIC_LOCAL_PARTS, EMAIL_PATTERNS
 
@@ -92,25 +96,135 @@ def source_theharvester(domain: str, timeout: int = 120) -> list[dict]:
 TEAM_PATHS = ['/about', '/team', '/our-team', '/staff', '/people', '/about-us',
               '/contact', '/leadership', '/who-we-are', '/meet-the-team']
 
+TEAM_PATH_HINTS = ('team', 'staff', 'people', 'leadership', 'about', 'contact', 'careers', 'join')
+
+
+def extract_emails_from_text(text: str, domain: str) -> set[str]:
+    """Extract direct and lightly obfuscated emails for a specific domain."""
+    found = set()
+    if not text:
+        return found
+
+    direct_re = re.compile(rf'[\w.+-]+@{re.escape(domain)}', re.I)
+    for m in direct_re.finditer(text):
+        found.add(m.group().lower().strip().rstrip('.'))
+
+    # Common obfuscations: jane [at] example.com, jane(at)example.com, jane at example.com
+    obfuscated_re = re.compile(
+        rf'([a-z0-9._%+-]{{1,64}})\s*(?:\[?\(?\s*at\s*\)?\]?|@)\s*{re.escape(domain)}',
+        re.I,
+    )
+    for m in obfuscated_re.finditer(text):
+        local = m.group(1).lower().strip('.-_')
+        if local:
+            found.add(f'{local}@{domain}')
+
+    return found
+
+
+def discover_candidate_paths(base_url: str, soup: BeautifulSoup) -> list[str]:
+    """Discover likely team/contact paths from homepage links."""
+    discovered = []
+    seen = set()
+
+    def add_path(candidate: str):
+        if not candidate:
+            return
+        if not candidate.startswith('/'):
+            return
+        candidate = candidate.split('#', 1)[0].split('?', 1)[0]
+        if candidate in seen:
+            return
+        if any(hint in candidate.lower() for hint in TEAM_PATH_HINTS):
+            seen.add(candidate)
+            discovered.append(candidate)
+
+    for anchor in soup.find_all('a', href=True):
+        href = (anchor.get('href') or '').strip()
+        if not href:
+            continue
+        if href.startswith('mailto:'):
+            continue
+        full = urljoin(base_url, href)
+        parsed = urlparse(full)
+        base_host = urlparse(base_url).netloc
+        if parsed.netloc and parsed.netloc != base_host:
+            continue
+        add_path(parsed.path)
+
+    return discovered
+
 def source_team_page(domain: str, timeout: int = 5) -> list[dict]:
     """Scrape company team/about/contact pages for emails."""
     results = []
-    email_re = re.compile(r'[\w.+-]+@[\w-]+\.[\w.]+')
     seen = set()
     headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
+    page_urls = []
+
+    def add_contact(email: str, source_hint: str, context_element=None):
+        email = email.lower().strip().rstrip('.')
+        if email in seen:
+            return
+        if ('@' + domain) not in email:
+            return
+        local = email.split('@')[0]
+        if local in GENERIC_LOCAL_PARTS:
+            return
+        first, last = infer_name_from_email(email)
+        title = ''
+        if context_element is not None:
+            name = extract_person_name(context_element)
+            if name:
+                first, last = name
+            context_text = context_element.get_text(' ', strip=True).lower()
+            for dm_title in DM_TITLES:
+                if dm_title in context_text:
+                    title = dm_title.title()
+                    break
+        seen.add(email)
+        results.append({
+            'email': email,
+            'first_name': first,
+            'last_name': last,
+            'title': title,
+            'source': source_hint,
+        })
+
     # First check if domain responds at all (skip entirely if not)
+    base_url = ''
     try:
-        requests.head(f'https://{domain}', timeout=(3, 3), headers=headers, allow_redirects=True)
+        r = requests.head(f'https://{domain}', timeout=(3, 3), headers=headers, allow_redirects=True)
+        base_url = r.url or f'https://{domain}'
     except Exception:
         try:
-            requests.head(f'http://{domain}', timeout=(3, 3), headers=headers, allow_redirects=True)
+            r = requests.head(f'http://{domain}', timeout=(3, 3), headers=headers, allow_redirects=True)
+            base_url = r.url or f'http://{domain}'
         except Exception:
             return results  # domain doesn't respond, skip all paths
-    for path in TEAM_PATHS:
+
+    # Start with homepage to discover additional candidate paths.
+    candidate_paths = list(TEAM_PATHS)
+    try:
+        home = requests.get(base_url, timeout=(3, timeout), headers=headers, allow_redirects=True)
+        if home.status_code == 200:
+            soup = BeautifulSoup(home.text, 'html.parser')
+            for discovered in discover_candidate_paths(base_url, soup):
+                if discovered not in candidate_paths:
+                    candidate_paths.append(discovered)
+            # Extract any immediate homepage emails.
+            for email in extract_emails_from_text(home.text, domain):
+                add_contact(email, 'team_page')
+    except Exception:
+        pass
+
+    for path in candidate_paths:
         for scheme in ['https', 'http']:
             url = f'{scheme}://{domain}{path}'
+            if url in page_urls:
+                continue
+            page_urls.append(url)
             try:
-                resp = requests.get(url, timeout=(3, 5), headers=headers, allow_redirects=True)
+                resp = requests.get(url, timeout=(3, timeout), headers=headers, allow_redirects=True)
                 if resp.status_code != 200:
                     continue
                 soup = BeautifulSoup(resp.text, 'html.parser')
@@ -118,40 +232,17 @@ def source_team_page(domain: str, timeout: int = 5) -> list[dict]:
                 for a in soup.find_all('a', href=True):
                     if a['href'].startswith('mailto:'):
                         email = a['href'].replace('mailto:', '').split('?')[0].lower().strip()
-                        if email not in seen and domain in email:
-                            first, last = infer_name_from_email(email)
-                            # Try to get name from surrounding text
-                            parent = a.find_parent(['div', 'li', 'td', 'article'])
-                            if parent:
-                                name = extract_person_name(parent)
-                                if name:
-                                    first, last = name
-                            results.append({
-                                'email': email,
-                                'first_name': first,
-                                'last_name': last,
-                                'source': 'team_page',
-                            })
-                            seen.add(email)
-                # Scan full page text for emails
-                for m in email_re.finditer(resp.text):
-                    email = m.group().lower().strip().rstrip('.')
-                    if email not in seen and domain in email:
-                        local = email.split('@')[0]
-                        if local in GENERIC_LOCAL_PARTS:
-                            continue  # skip info@, hello@, etc.
-                        first, last = infer_name_from_email(email)
-                        results.append({
-                            'email': email,
-                            'first_name': first,
-                            'last_name': last,
-                            'source': 'team_page',
-                        })
-                        seen.add(email)
+                        parent = a.find_parent(['div', 'li', 'td', 'article', 'section'])
+                        add_contact(email, 'team_page', context_element=parent)
+
+                # Scan full page text for direct and obfuscated emails tied to this domain.
+                for email in extract_emails_from_text(resp.text, domain):
+                    add_contact(email, 'team_page')
                 break  # https worked, don't try http
             except Exception:
                 continue
-        time.sleep(0.3)
+        time.sleep(0.15)
+
     return results
 
 
