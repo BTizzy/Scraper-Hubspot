@@ -19,7 +19,8 @@ import csv
 import argparse
 
 HUBSPOT_HEADERS = ['Email', 'First Name', 'Last Name', 'Company', 'Job Title',
-                   'Phone', 'Website', 'City', 'Signal Tag', 'LinkedIn URL', 'Notes']
+                   'Phone', 'Website', 'City', 'Signal Tag', 'Confidence Level',
+                   'LinkedIn URL', 'Notes']
 
 GENERIC_LOCAL = ['info', 'hello', 'contact', 'admin', 'support', 'office',
                  'team', 'sales', 'noreply', 'mail', 'billing', 'hr',
@@ -84,12 +85,10 @@ def passes_quality(row):
     # Accept if MX passed OR verification_score says PASS
     if mx != 'TRUE' and 'PASS' not in vscore:
         return False, 'MX check failed'
-    # Enforce final confidence tier: only A/B are importable
-    if confidence not in ('A', 'B'):
+    # Accept A, B, and C confidence tiers for HubSpot import.
+    # Ryan can filter by Confidence Level column in HubSpot.
+    if confidence not in ('A', 'B', 'C'):
         return False, f'Low confidence ({confidence or "unknown"})'
-    # Officer permutation emails are guessed patterns; require explicit SMTP accept.
-    if source == 'officer_permutation' and not smtp_accept:
-        return False, 'Officer permutation without SMTP acceptance'
     return True, ''
 
 
@@ -171,6 +170,7 @@ def build(input_csv, output_csv, reject_csv):
                 'Website': domain,
                 'City': row.get('city') or row.get('City') or 'Seattle',
                 'Signal Tag': signal if signal else 'manual_review',
+                'Confidence Level': row.get('confidence_level') or row.get('Confidence Level') or '',
                 'LinkedIn URL': row.get('linkedin_url') or row.get('LinkedIn URL') or '',
                 'Notes': row.get('notes') or row.get('Notes') or
                          row.get('score_breakdown') or '',

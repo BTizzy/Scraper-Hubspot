@@ -334,8 +334,8 @@ Examples:
     parser.add_argument('--hunter-key', default='', help='Hunter.io API key')
     parser.add_argument('--skip-theharvester', action='store_true', help='Skip theHarvester')
     parser.add_argument('--skip-dorks', action='store_true', help='Skip DuckDuckGo dork')
-    parser.add_argument('--min-level', default='B', choices=['A', 'B', 'C', 'D'],
-                        help='Min confidence level for HubSpot import (default: B)')
+    parser.add_argument('--min-level', default='C', choices=['A', 'B', 'C', 'D'],
+                        help='Min confidence level for HubSpot import (default: C)')
     parser.add_argument('--output-dir', default='output', help='Output directory')
     parser.add_argument('--dry-run', action='store_true', help='Print plan only')
     parser.add_argument('--disable-contract-gates', action='store_true',

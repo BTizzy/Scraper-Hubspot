@@ -137,12 +137,14 @@ def main() -> int:
     parser.add_argument('--state-dir', default='state', help='Directory for seen companies/emails state')
     parser.add_argument('--output-root', default='daily_output', help='Root folder for date-stamped pipeline outputs')
     parser.add_argument('--run-name', default='', help='Optional suffix for output folder name')
-    parser.add_argument('--min-level', default='B', choices=['A', 'B', 'C', 'D'])
+    parser.add_argument('--min-level', default='C', choices=['A', 'B', 'C', 'D'])
     parser.add_argument('--smtp', action='store_true', help='Pass --smtp through to run_pipeline.py')
     parser.add_argument('--hunter-key', default='', help='Pass through Hunter API key')
     parser.add_argument('--skip-theharvester', action='store_true')
     parser.add_argument('--skip-dorks', action='store_true')
     parser.add_argument('--disable-contract-gates', action='store_true')
+    parser.add_argument('--hubspot-push', action='store_true',
+                        help='Push hubspot_import.csv to HubSpot API (requires HUBSPOT_API_KEY)')
     args = parser.parse_args()
 
     scripts_dir = Path(__file__).resolve().parent
@@ -240,6 +242,19 @@ def main() -> int:
     print(f'  hubspot_contacts_skipped_seen={len(duplicate_rows)}')
     print(f'  state_seen_companies={seen_companies_path}')
     print(f'  state_seen_emails={seen_emails_path}')
+
+    # Optional: push to HubSpot API
+    if args.hubspot_push and novel_rows:
+        print('\nPushing to HubSpot API...')
+        push_cmd = [
+            sys.executable,
+            str(scripts_dir / 'push_to_hubspot.py'),
+            '--input', str(hubspot_path),
+        ]
+        push_rc = subprocess.run(push_cmd, cwd=str(scripts_dir)).returncode
+        if push_rc != 0:
+            print(f'HubSpot push failed with exit code {push_rc}')
+            # Non-fatal — CSV output still succeeded
 
     return 0
 
