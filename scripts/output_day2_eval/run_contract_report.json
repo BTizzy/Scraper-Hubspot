@@ -1,0 +1,103 @@
+{
+  "contract": {
+    "count_confidence_levels": [
+      "A",
+      "B"
+    ],
+    "enabled": true,
+    "hard_fail": true,
+    "min_contacts_per_run": 50,
+    "min_unique_companies_per_run": 25,
+    "min_unique_companies_per_signal": 3,
+    "required_signals": [
+      "active_lawsuit",
+      "new_business",
+      "rebrand",
+      "formation_with_employees",
+      "active_hiring",
+      "website_refresh"
+    ]
+  },
+  "evaluation": {
+    "allowed_levels": [
+      "A",
+      "B"
+    ],
+    "deficits": [
+      "contacts_ab=0 < required=50",
+      "unique_companies=0 < required=25",
+      "signal=active_lawsuit unique_companies=0 < required=3",
+      "signal=new_business unique_companies=0 < required=3",
+      "signal=rebrand unique_companies=0 < required=3",
+      "signal=formation_with_employees unique_companies=0 < required=3",
+      "signal=active_hiring unique_companies=0 < required=3",
+      "signal=website_refresh unique_companies=0 < required=3"
+    ],
+    "eligible_contacts": 0,
+    "passed": false,
+    "signal_company_counts": {
+      "active_hiring": 0,
+      "active_lawsuit": 0,
+      "formation_with_employees": 0,
+      "new_business": 0,
+      "rebrand": 0,
+      "website_refresh": 0
+    },
+    "unique_companies": 0
+  },
+  "generated_at": "2026-03-10T17:25:43.328392",
+  "input": "/workspaces/Scraper-Hubspot/scripts/test_data/sos_realistic.csv",
+  "input_profile": {
+    "age_buckets": {
+      "0_365_days": 0,
+      "366_730_days": 5,
+      "731_plus_days": 0,
+      "unknown": 0
+    },
+    "rows": 5,
+    "with_registered_date": 5
+  },
+  "output_dir": "/workspaces/Scraper-Hubspot/scripts/output_day2_eval",
+  "pipeline_failed": false,
+  "signal_diagnostics": {
+    "hiring": {
+      "new_business_only": 3,
+      "problem_rows": 0,
+      "rows": 5,
+      "signal_hits": 1,
+      "status_counts": {
+        "match": 1,
+        "ok_no_match": 4
+      }
+    },
+    "lawsuits": {
+      "new_business_only": 4,
+      "problem_rows": 0,
+      "rows": 5,
+      "signal_hits": 0,
+      "status_counts": {
+        "ok_no_match": 5
+      }
+    },
+    "rebrands": {
+      "new_business_only": 4,
+      "problem_rows": 5,
+      "rows": 5,
+      "signal_hits": 0,
+      "status_counts": {
+        "no_row_history": 5
+      }
+    },
+    "refresh": {
+      "new_business_only": 2,
+      "problem_rows": 1,
+      "rows": 5,
+      "signal_hits": 3,
+      "status_counts": {
+        "match_whois": 3,
+        "ok_no_match": 1,
+        "request_error": 1
+      }
+    }
+  }
+}

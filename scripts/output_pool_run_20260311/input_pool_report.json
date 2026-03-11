@@ -1,0 +1,37 @@
+{
+  "by_source_input": {
+    "sos:sos_realistic": 5,
+    "sos:sos_sample": 5
+  },
+  "by_source_output": {
+    "sos:sos_realistic": 5,
+    "sos:sos_sample": 5
+  },
+  "config": {
+    "city": "Seattle WA",
+    "domain_enrichment_enabled": true,
+    "domain_required": true,
+    "jobs_news_discovery_enabled": true,
+    "li_safe_discovery_enabled": true,
+    "max_enrichment_rows": 0,
+    "max_jobs_news_domains": 25,
+    "max_li_safe_domains": 15,
+    "max_runtime_minutes": 8,
+    "max_search_domains": 25,
+    "search_discovery_enabled": true
+  },
+  "counts": {
+    "deduped_rows": 5,
+    "discovery_rows": 0,
+    "enriched_rows": 10,
+    "final_rows": 5,
+    "input_rows": 10,
+    "merged_rows": 5
+  },
+  "generated_at": "2026-03-11T16:12:34.891986",
+  "output_csv": "/workspaces/Scraper-Hubspot/scripts/output_pool_run_20260311/input_pool.csv",
+  "rejections": {},
+  "runtime_seconds": 276.42,
+  "seen_company_keys_loaded": 0,
+  "state_filter_enabled": true
+}

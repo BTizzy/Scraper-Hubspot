@@ -22,6 +22,7 @@ import csv
 import json
 import re
 import requests
+import socket
 import time
 import argparse
 from datetime import datetime, timedelta
@@ -172,6 +173,37 @@ def clean_company_for_domain(name: str) -> str:
     return clean.lower().replace(' ', '')
 
 
+def normalize_domain(value: str) -> str:
+    """Normalize URL/domain strings to a plain host name."""
+    if not value:
+        return ''
+    value = value.strip()
+    if not value:
+        return ''
+    if value.startswith('//'):
+        value = 'https:' + value
+    elif not value.startswith('http'):
+        value = 'https://' + value
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return ''
+    domain = parsed.netloc.lower().strip()
+    if domain.startswith('www.'):
+        domain = domain[4:]
+    domain = domain.split(':')[0]
+    return domain
+
+
+def domain_has_dns(domain: str) -> bool:
+    """Quick A/AAAA check to ensure domain resolves."""
+    try:
+        socket.getaddrinfo(domain, None)
+        return True
+    except Exception:
+        return False
+
+
 def domain_has_mx(domain: str) -> bool:
     """Quick MX check to validate a domain is real."""
     try:
@@ -194,9 +226,34 @@ def domain_responds(domain: str) -> bool:
     return False
 
 
+def try_domain_variants(slug: str) -> str:
+    """Try many modern TLD variants for a slug and return first valid hit."""
+    tlds = [
+        '.com', '.net', '.org', '.co', '.us', '.biz',
+        '.io', '.dev', '.app', '.tech', '.software', '.company', '.business',
+        '.co.uk', '.com.au', '.ca', '.de', '.ch', '.eu',
+        '.ai', '.cloud', '.digital', '.online', '.site', '.space',
+    ]
+    for tld in tlds:
+        domain = slug + tld
+        if domain_has_dns(domain) or domain_has_mx(domain) or domain_responds(domain):
+            return domain
+    return ''
+
+
 def discover_domain_duckduckgo(company_name: str) -> str:
     """Search DuckDuckGo for the company website."""
     query = f'"{company_name}" seattle WA website'
+    skip_domains = ['facebook.com', 'linkedin.com', 'yelp.com', 'twitter.com',
+                    'instagram.com', 'bbb.org', 'yellowpages.com', 'mapquest.com',
+                    'google.com', 'bing.com', 'wa.gov', 'sec.gov', 'wikipedia.org',
+                    'bloomberg.com', 'dnb.com', 'opencorporates.com', 'zoominfo.com',
+                    'crunchbase.com', 'indeed.com', 'glassdoor.com', 'github.com',
+                    'medium.com', 'reddit.com', 'producthunt.com', 'techcrunch.com']
+
+    def is_allowed_domain(domain: str) -> bool:
+        return bool(domain) and not any(domain == s or domain.endswith('.' + s) for s in skip_domains)
+
     try:
         r = requests.get(
             'https://html.duckduckgo.com/html/',
@@ -205,34 +262,49 @@ def discover_domain_duckduckgo(company_name: str) -> str:
             timeout=10,
         )
         soup = BeautifulSoup(r.text, 'html.parser')
+
+        # Prefer explicit LinkedIn company URLs as a high-signal hint.
+        for link in soup.find_all('a', href=True):
+            href = link.get('href', '')
+            if 'linkedin.com/company/' not in href:
+                continue
+            m = re.search(r'linkedin\.com/company/([a-z0-9\-]+)', href.lower())
+            if not m:
+                continue
+            slug_guess = m.group(1).replace('-', '')
+            if slug_guess:
+                candidate = slug_guess + '.com'
+                if domain_has_dns(candidate) or domain_responds(candidate):
+                    return candidate
+
         # DuckDuckGo HTML results have .result__url spans
         for link in soup.select('a.result__url'):
             href = link.get('href', '') or link.get_text(strip=True)
             if href:
-                # Extract domain from the URL
-                if not href.startswith('http'):
-                    href = 'https://' + href
-                parsed = urlparse(href)
-                domain = parsed.netloc.lower()
-                # Skip social media, directories, government sites
-                skip_domains = ['facebook.com', 'linkedin.com', 'yelp.com', 'twitter.com',
-                                'instagram.com', 'bbb.org', 'yellowpages.com', 'mapquest.com',
-                                'google.com', 'bing.com', 'wa.gov', 'sec.gov', 'wikipedia.org',
-                                'bloomberg.com', 'dnb.com', 'opencorporates.com', 'zoominfo.com',
-                                'crunchbase.com', 'indeed.com', 'glassdoor.com']
-                if domain and not any(domain.endswith(s) for s in skip_domains):
+                domain = normalize_domain(href)
+                if is_allowed_domain(domain):
                     return domain
         # Fallback: try result__a links
         for link in soup.select('a.result__a'):
             href = link.get('href', '')
             if href and href.startswith('http'):
-                parsed = urlparse(href)
-                domain = parsed.netloc.lower()
-                skip_domains = ['facebook.com', 'linkedin.com', 'yelp.com', 'twitter.com',
-                                'instagram.com', 'bbb.org', 'yellowpages.com', 'mapquest.com',
-                                'google.com', 'bing.com', 'wa.gov', 'wikipedia.org']
-                if domain and not any(domain.endswith(s) for s in skip_domains):
+                domain = normalize_domain(href)
+                if is_allowed_domain(domain):
                     return domain
+        # Final fallback: generic anchor scan for hidden URLs in DDG HTML
+        for link in soup.find_all('a', href=True):
+            href = link.get('href', '')
+            if not href:
+                continue
+            if href.startswith('//'):
+                href = 'https:' + href
+            elif href.startswith('/'):
+                continue
+            elif not href.startswith('http'):
+                href = 'https://' + href
+            domain = normalize_domain(href)
+            if is_allowed_domain(domain):
+                return domain
     except Exception as e:
         print(f"  ✗ DuckDuckGo search failed: {e}")
     return ''
@@ -241,21 +313,37 @@ def discover_domain_duckduckgo(company_name: str) -> str:
 def discover_website(company_name: str) -> str:
     """
     Try multiple strategies to find a company's website domain:
-      1. DuckDuckGo search
-      2. Direct domain guess (companyname.com)
+      1. DuckDuckGo search with filtering
+      2. Direct domain variants from cleaned slug
+      3. Hyphenated/short-name variants for multi-word companies
     """
     # Strategy 1: DuckDuckGo
     domain = discover_domain_duckduckgo(company_name)
-    if domain and (domain_has_mx(domain) or domain_responds(domain)):
+    if domain and (domain_has_dns(domain) or domain_has_mx(domain) or domain_responds(domain)):
         return domain
 
     # Strategy 2: Guess common domain patterns
     slug = clean_company_for_domain(company_name)
     if slug:
-        for tld in ['.com', '.net', '.co']:
-            guess = slug + tld
-            if domain_responds(guess):
-                return guess
+        guessed = try_domain_variants(slug)
+        if guessed:
+            return guessed
+
+        words = re.split(r'[^a-z0-9]+', company_name.lower())
+        words = [w for w in words if w and w not in {
+            'llc', 'inc', 'corp', 'company', 'co', 'ltd', 'group',
+            'services', 'holdings', 'the', 'and'
+        }]
+
+        if len(words) > 1:
+            guessed = try_domain_variants('-'.join(words))
+            if guessed:
+                return guessed
+
+        if len(words) > 2:
+            guessed = try_domain_variants(words[0] + words[-1])
+            if guessed:
+                return guessed
 
     return domain or ''  # return DDG result even if we couldn't verify it
 

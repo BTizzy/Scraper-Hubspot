@@ -1,0 +1,53 @@
+{
+  "batch_size": 20,
+  "batches_attempted": 1,
+  "candidate_companies": 5,
+  "contract": {
+    "count_confidence_levels": [
+      "A",
+      "B"
+    ],
+    "enabled": true,
+    "hard_fail": true,
+    "min_contacts_per_run": 50,
+    "min_unique_companies_per_run": 25,
+    "min_unique_companies_per_signal": 3,
+    "required_signals": [
+      "active_lawsuit",
+      "new_business",
+      "rebrand",
+      "formation_with_employees",
+      "active_hiring",
+      "website_refresh"
+    ]
+  },
+  "evaluation": {
+    "deficits": [
+      "real_active_contacts=0 < required=50",
+      "unique_companies=0 < required=25",
+      "signal=active_lawsuit unique_companies=0 < required=3",
+      "signal=new_business unique_companies=0 < required=3",
+      "signal=rebrand unique_companies=0 < required=3",
+      "signal=formation_with_employees unique_companies=0 < required=3",
+      "signal=active_hiring unique_companies=0 < required=3",
+      "signal=website_refresh unique_companies=0 < required=3"
+    ],
+    "eligible_contacts": 0,
+    "passed": false,
+    "signal_company_counts": {
+      "active_hiring": 0,
+      "active_lawsuit": 0,
+      "formation_with_employees": 0,
+      "new_business": 0,
+      "rebrand": 0,
+      "website_refresh": 0
+    },
+    "unique_companies": 0
+  },
+  "generated_at": "2026-03-11T16:42:56.961546",
+  "input": "/workspaces/Scraper-Hubspot/scripts/output_pool_run_20260311/input_pool.csv",
+  "max_batches": 2,
+  "output_dir": "/workspaces/Scraper-Hubspot/scripts/output_pool_run_20260311/20260311_contract",
+  "real_active_contacts": 0,
+  "used_companies": 5
+}

@@ -26,11 +26,15 @@ Flags:
 """
 import argparse
 import csv
+import json
 import os
 import subprocess
 import sys
 import time
 from datetime import datetime
+
+from local_secrets import load_local_env
+from trillium_config import get_daily_run_contract
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -87,9 +91,229 @@ def count_csv_rows(filepath):
         return 0
 
 
+def summarize_signal_stage(path, signal_name, status_col, error_col=''):
+    """Summarize signal enrichment performance from an output CSV."""
+    ok_statuses = {
+        'ok',
+        'ok_no_match',
+        'ok_no_keyword',
+        'no_domain',
+        'match',
+        'match_http',
+        'match_whois',
+        'ok_ddg_fallback',
+    }
+    summary = {
+        'rows': 0,
+        'signal_hits': 0,
+        'new_business_only': 0,
+        'status_counts': {},
+        'problem_rows': 0,
+    }
+    if not os.path.exists(path):
+        return summary
+
+    try:
+        with open(path, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                summary['rows'] += 1
+                signal_tag = (row.get('signal_tag', '') or '').strip()
+                tags = {t.strip() for t in signal_tag.split(';') if t.strip()}
+
+                if signal_name in tags:
+                    summary['signal_hits'] += 1
+                if tags == {'new_business'}:
+                    summary['new_business_only'] += 1
+
+                status = (row.get(status_col, '') or '').strip() or 'missing_status'
+                summary['status_counts'][status] = summary['status_counts'].get(status, 0) + 1
+
+                has_problem = status not in ok_statuses
+                if error_col:
+                    err_val = (row.get(error_col, '') or '').strip()
+                    has_problem = has_problem or bool(err_val)
+                if has_problem:
+                    summary['problem_rows'] += 1
+    except Exception:
+        return summary
+
+    return summary
+
+
+def parse_date_flex(date_str):
+    """Parse a date string from common pipeline formats."""
+    if not date_str:
+        return None
+    for fmt in ('%Y-%m-%d', '%Y-%m-%dT%H:%M:%S', '%m/%d/%Y', '%m-%d-%Y', '%d-%m-%Y'):
+        try:
+            return datetime.strptime(str(date_str).strip(), fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def preflight_input_profile(sos_path):
+    """Summarize input CSV age distribution and row count before running."""
+    profile = {
+        'rows': 0,
+        'with_registered_date': 0,
+        'age_buckets': {
+            '0_365_days': 0,
+            '366_730_days': 0,
+            '731_plus_days': 0,
+            'unknown': 0,
+        },
+    }
+    if not os.path.exists(sos_path):
+        return profile
+
+    now = datetime.now()
+    try:
+        with open(sos_path, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                profile['rows'] += 1
+                dt = parse_date_flex(row.get('registered_date', ''))
+                if dt is None:
+                    profile['age_buckets']['unknown'] += 1
+                    continue
+                profile['with_registered_date'] += 1
+                age_days = max(0, (now - dt).days)
+                if age_days <= 365:
+                    profile['age_buckets']['0_365_days'] += 1
+                elif age_days <= 730:
+                    profile['age_buckets']['366_730_days'] += 1
+                else:
+                    profile['age_buckets']['731_plus_days'] += 1
+    except Exception:
+        return profile
+
+    return profile
+
+
+def load_csv_rows(path):
+    """Read all rows from a CSV file safely."""
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, newline='', encoding='utf-8') as f:
+            return list(csv.DictReader(f))
+    except Exception:
+        return []
+
+
+def value_counts(rows, field, empty_label='(empty)'):
+    """Count normalized values for a field in list-of-dict rows."""
+    counts = {}
+    for row in rows:
+        value = (row.get(field, '') or '').strip()
+        key = value if value else empty_label
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def summarize_funnel(raw_rows, verified_rows, scored_rows, reject_rows):
+    """Build end-to-end funnel diagnostics for contact quality bottlenecks."""
+    funnel = {
+        'counts': {
+            'raw': len(raw_rows),
+            'verified': len(verified_rows),
+            'scored': len(scored_rows),
+            'rejected': len(reject_rows),
+        },
+        'source_mix_raw': value_counts(raw_rows, 'source'),
+        'source_mix_scored': value_counts(scored_rows, 'source'),
+        'confidence_mix': value_counts(scored_rows, 'confidence_level'),
+        'smtp': {
+            'attempted': 0,
+            'accepted': 0,
+            'rejected': 0,
+            'unknown': 0,
+            'not_attempted': 0,
+            'attempt_status': {},
+        },
+        'reject_reasons': value_counts(reject_rows, 'reject_reason'),
+    }
+
+    for row in verified_rows:
+        attempted = (row.get('smtp_attempted', '') or '').strip().upper()
+        smtp_ok = (row.get('smtp_ok', '') or '').strip().upper()
+        smtp_status = (row.get('smtp_status', '') or '').strip() or '(empty)'
+        funnel['smtp']['attempt_status'][smtp_status] = funnel['smtp']['attempt_status'].get(smtp_status, 0) + 1
+        if attempted == 'TRUE':
+            funnel['smtp']['attempted'] += 1
+            if smtp_ok == 'TRUE' or smtp_ok == 'ACCEPT':
+                funnel['smtp']['accepted'] += 1
+            elif smtp_ok == 'FALSE' or smtp_ok == 'REJECT':
+                funnel['smtp']['rejected'] += 1
+            else:
+                funnel['smtp']['unknown'] += 1
+        else:
+            funnel['smtp']['not_attempted'] += 1
+
+    return funnel
+
+
+def evaluate_run_contract(scored_rows, contract):
+    """Evaluate hard run gates using scored contacts."""
+    allowed_levels = set(contract.get('count_confidence_levels', ['A', 'B']))
+    required_signals = list(contract.get('required_signals', []))
+    min_signal_companies = int(contract.get('min_unique_companies_per_signal', 0))
+    min_contacts = int(contract.get('min_contacts_per_run', 0))
+    min_companies = int(contract.get('min_unique_companies_per_run', 0))
+
+    eligible = [r for r in scored_rows if (r.get('confidence_level', '') or '').strip() in allowed_levels]
+    eligible_contacts = len(eligible)
+    unique_companies = { (r.get('company', '') or '').strip().lower() for r in eligible if (r.get('company', '') or '').strip() }
+
+    signal_company_map = {s: set() for s in required_signals}
+    for row in eligible:
+        company = (row.get('company', '') or '').strip()
+        if not company:
+            continue
+        tags = {t.strip() for t in (row.get('signal_tag', '') or '').split(';') if t.strip()}
+        for sig in required_signals:
+            if sig in tags:
+                signal_company_map[sig].add(company.lower())
+
+    deficits = []
+    if eligible_contacts < min_contacts:
+        deficits.append(f"contacts_ab={eligible_contacts} < required={min_contacts}")
+    if len(unique_companies) < min_companies:
+        deficits.append(f"unique_companies={len(unique_companies)} < required={min_companies}")
+
+    signal_counts = {}
+    for sig, companies in signal_company_map.items():
+        count = len(companies)
+        signal_counts[sig] = count
+        if count < min_signal_companies:
+            deficits.append(f"signal={sig} unique_companies={count} < required={min_signal_companies}")
+
+    passed = len(deficits) == 0
+    return {
+        'passed': passed,
+        'eligible_contacts': eligible_contacts,
+        'unique_companies': len(unique_companies),
+        'allowed_levels': sorted(allowed_levels),
+        'signal_company_counts': signal_counts,
+        'deficits': deficits,
+    }
+
+
+def write_contract_report(path, payload):
+    """Write run contract evaluation report to JSON for auditability."""
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"  ⚠ Could not write run contract report: {e}")
+
+
 # ── Main pipeline ──────────────────────────────────────────────────────────────
 
 def main():
+    load_local_env()
     parser = argparse.ArgumentParser(
         description='Trillium Hiring — Lead Builder Pipeline v2',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -114,6 +338,8 @@ Examples:
                         help='Min confidence level for HubSpot import (default: B)')
     parser.add_argument('--output-dir', default='output', help='Output directory')
     parser.add_argument('--dry-run', action='store_true', help='Print plan only')
+    parser.add_argument('--disable-contract-gates', action='store_true',
+                        help='Disable hard daily run contract checks')
     args = parser.parse_args()
 
     # Resolve paths
@@ -125,10 +351,20 @@ Examples:
     sized           = os.path.join(out_dir, 'companies_sized.csv')
     lawsuits        = os.path.join(out_dir, 'companies_lawsuits.csv')
     rebrands        = os.path.join(out_dir, 'companies_rebrands.csv')
+    hiring          = os.path.join(out_dir, 'companies_hiring.csv')
+    refresh         = os.path.join(out_dir, 'companies_refresh.csv')
     contacts_raw    = os.path.join(out_dir, 'contacts_raw.csv')
     contacts_verified = os.path.join(out_dir, 'contacts_verified.csv')
     contacts_scored = os.path.join(out_dir, 'contacts_scored.csv')
+    contract_report = os.path.join(out_dir, 'run_contract_report.json')
+    daily_kpi_report = os.path.join(out_dir, 'daily_kpi_report.json')
     hubspot         = os.path.join(out_dir, 'hubspot_import.csv')
+    rejects         = os.path.join(out_dir, 'rejects.csv')
+
+    contract = get_daily_run_contract()
+    contract_enabled = bool(contract.get('enabled', True)) and not args.disable_contract_gates
+
+    input_profile = preflight_input_profile(sos)
 
     py = sys.executable  # Use the same Python that runs this script
 
@@ -159,10 +395,22 @@ Examples:
          '--input', lawsuits, '--output', rebrands],
         'OpenCorporates previous names + website keyword scan'))
 
-    # Step 5: Waterfall contact enrichment (NEW)
+    # Step 5: Active hiring detection
+    steps.append(PipelineStep(5, 'Active Hiring Detection',
+        [py, os.path.join(SCRIPTS_DIR, 'find_active_hiring.py'),
+         '--input', rebrands, '--output', hiring],
+        'Careers pages and job-posting heuristics'))
+
+    # Step 6: Website refresh detection
+    steps.append(PipelineStep(6, 'Website Refresh Detection',
+        [py, os.path.join(SCRIPTS_DIR, 'find_website_refresh.py'),
+         '--input', hiring, '--output', refresh],
+        'WHOIS update dates + HTTP Last-Modified heuristics'))
+
+    # Step 7: Waterfall contact enrichment (NEW)
     waterfall_cmd = [
         py, os.path.join(SCRIPTS_DIR, 'waterfall_enricher.py'),
-        '--input', rebrands, '--output', contacts_raw
+        '--input', refresh, '--output', contacts_raw
     ]
     if args.skip_theharvester:
         waterfall_cmd.append('--skip-theharvester')
@@ -170,33 +418,34 @@ Examples:
         waterfall_cmd.append('--skip-dorks')
     if args.hunter_key:
         waterfall_cmd.extend(['--hunter-key', args.hunter_key])
-    steps.append(PipelineStep(5, 'Waterfall Contact Enrichment',
+    steps.append(PipelineStep(7, 'Waterfall Contact Enrichment',
         waterfall_cmd,
         '5-source cascade: theHarvester → team pages → officer permutation → Hunter.io → dorks'))
 
-    # Step 6: Email verification
+    # Step 8: Email verification
     verify_cmd = [
         py, os.path.join(SCRIPTS_DIR, 'verify_emails.py'),
         '--input', contacts_raw, '--output', contacts_verified
     ]
     if args.smtp:
         verify_cmd.append('--smtp')
-    steps.append(PipelineStep(6, 'Email Verification',
+    steps.append(PipelineStep(8, 'Email Verification',
         verify_cmd,
         'MX + domain age' + (' + SMTP RCPT + catch-all' if args.smtp else '')))
 
-    # Step 7: Freshness scoring (NEW)
-    steps.append(PipelineStep(7, 'Freshness Scoring',
+    # Step 9: Freshness scoring (NEW)
+    steps.append(PipelineStep(9, 'Freshness Scoring',
         [py, os.path.join(SCRIPTS_DIR, 'freshness_scorer.py'),
          '--input', contacts_verified, '--output', contacts_scored,
          '--min-level', args.min_level],
         f'Score by source quality + verification + recency → filter ≥{args.min_level}'))
 
-    # Step 8: HubSpot CSV builder
-    steps.append(PipelineStep(8, 'HubSpot CSV Builder',
+    # Step 10: HubSpot CSV builder
+    steps.append(PipelineStep(10, 'HubSpot CSV Builder',
         [py, os.path.join(SCRIPTS_DIR, 'build_csv.py'),
          '--input', contacts_scored.replace('.csv', '_qualified.csv'),
-         '--output', hubspot],
+         '--output', hubspot,
+         '--rejects', rejects],
         'Quality gates + exact HubSpot header format'))
 
     total = len(steps)
@@ -213,7 +462,29 @@ Examples:
   Verify:  MX{' + SMTP' if args.smtp else ''}{' + Hunter.io' if args.hunter_key else ''}
   Filter:  confidence ≥ {args.min_level}
   Steps:   {total}
+  Contract gates:  {'ENABLED' if contract_enabled else 'DISABLED'}
 """)
+
+    print("  📥 Input profile:")
+    print(f"    rows={input_profile['rows']} registered_date_present={input_profile['with_registered_date']}")
+    print(f"    age_buckets={input_profile['age_buckets']}")
+    young_rows = input_profile['age_buckets'].get('0_365_days', 0) + input_profile['age_buckets'].get('366_730_days', 0)
+    if input_profile['rows'] > 0 and young_rows == input_profile['rows']:
+        print("    ⚠ all rows are <=730 days old; lawsuit/rebrand density may be low")
+
+    if contract_enabled:
+        print("  🎯 Daily run contract:")
+        print(
+            "    "
+            f"min_contacts={contract.get('min_contacts_per_run')} "
+            f"min_unique_companies={contract.get('min_unique_companies_per_run')} "
+            f"levels={contract.get('count_confidence_levels')}"
+        )
+        print(
+            "    "
+            f"required_signals={contract.get('required_signals')} "
+            f"min_unique_companies_per_signal={contract.get('min_unique_companies_per_signal')}"
+        )
 
     for step in steps:
         marker = '▶' if not args.dry_run else '○'
@@ -223,7 +494,7 @@ Examples:
 
     if args.dry_run:
         print("\n  🏁 Dry run — no steps executed.")
-        return
+        return 0
 
     # ── Execute ────────────────────────────────────────────────────────────────
     pipeline_start = time.time()
@@ -259,10 +530,13 @@ Examples:
         ('Companies sized', sized),
         ('Lawsuit signals', lawsuits),
         ('Rebrand signals', rebrands),
+        ('Hiring signals', hiring),
+        ('Refresh signals', refresh),
         ('Contacts (raw)', contacts_raw),
         ('Contacts (verified)', contacts_verified),
         ('Contacts (scored)', contacts_scored),
         ('HubSpot import', hubspot),
+        ('Rejects', rejects),
     ]
 
     print(f"\n  📁 Output files:")
@@ -286,9 +560,179 @@ Examples:
             bar = '█' * min(count, 40)
             print(f"    {lvl}: {count:>4d} {bar}")
 
-    if not failed:
+    # Signal-stage diagnostics
+    lawsuit_diag = summarize_signal_stage(
+        lawsuits,
+        signal_name='active_lawsuit',
+        status_col='lawsuits_query_status',
+        error_col='lawsuits_error',
+    )
+    rebrand_diag = summarize_signal_stage(
+        rebrands,
+        signal_name='rebrand',
+        status_col='rebrand_query_status',
+        error_col='rebrand_error',
+    )
+    hiring_diag = summarize_signal_stage(
+        hiring,
+        signal_name='active_hiring',
+        status_col='hiring_query_status',
+        error_col='hiring_error',
+    )
+    refresh_diag = summarize_signal_stage(
+        refresh,
+        signal_name='website_refresh',
+        status_col='website_refresh_status',
+        error_col='website_refresh_error',
+    )
+
+    if lawsuit_diag['rows'] > 0 or rebrand_diag['rows'] > 0 or hiring_diag['rows'] > 0 or refresh_diag['rows'] > 0:
+        print("\n  🔎 Signal diagnostics:")
+    if lawsuit_diag['rows'] > 0:
+        print(
+            "    lawsuits: "
+            f"rows={lawsuit_diag['rows']} "
+            f"active_lawsuit={lawsuit_diag['signal_hits']} "
+            f"problem_rows={lawsuit_diag['problem_rows']}"
+        )
+        print(f"      statuses={lawsuit_diag['status_counts']}")
+        if lawsuit_diag['signal_hits'] == 0 and lawsuit_diag['problem_rows'] > 0:
+            print("      ⚠ no active_lawsuit signals and lawsuit API/problem rows were detected")
+
+    if rebrand_diag['rows'] > 0:
+        print(
+            "    rebrands: "
+            f"rows={rebrand_diag['rows']} "
+            f"rebrand={rebrand_diag['signal_hits']} "
+            f"problem_rows={rebrand_diag['problem_rows']} "
+            f"new_business_only={rebrand_diag['new_business_only']}"
+        )
+        print(f"      query_statuses={rebrand_diag['status_counts']}")
+        if rebrand_diag['signal_hits'] == 0 and rebrand_diag['problem_rows'] > 0:
+            print("      ⚠ no rebrand signals and rebrand API/problem rows were detected")
+        if rebrand_diag['new_business_only'] == rebrand_diag['rows'] and rebrand_diag['rows'] > 0:
+            print("      ⚠ every record remained new_business-only; check dataset maturity and API availability")
+
+    if hiring_diag['rows'] > 0:
+        print(
+            "    hiring: "
+            f"rows={hiring_diag['rows']} "
+            f"active_hiring={hiring_diag['signal_hits']} "
+            f"problem_rows={hiring_diag['problem_rows']}"
+        )
+        print(f"      statuses={hiring_diag['status_counts']}")
+
+    if refresh_diag['rows'] > 0:
+        print(
+            "    refresh: "
+            f"rows={refresh_diag['rows']} "
+            f"website_refresh={refresh_diag['signal_hits']} "
+            f"problem_rows={refresh_diag['problem_rows']}"
+        )
+        print(f"      statuses={refresh_diag['status_counts']}")
+
+    # Funnel diagnostics for A/B throughput bottlenecks
+    raw_rows = load_csv_rows(contacts_raw)
+    verified_rows = load_csv_rows(contacts_verified)
+    scored_rows = load_csv_rows(contacts_scored)
+    reject_rows = load_csv_rows(rejects)
+    funnel = summarize_funnel(raw_rows, verified_rows, scored_rows, reject_rows)
+
+    print("\n  🧪 Funnel diagnostics:")
+    print(
+        "    "
+        f"raw={funnel['counts']['raw']} "
+        f"verified={funnel['counts']['verified']} "
+        f"scored={funnel['counts']['scored']} "
+        f"rejected={funnel['counts']['rejected']}"
+    )
+    print(f"    source_mix_raw={funnel['source_mix_raw']}")
+    print(f"    source_mix_scored={funnel['source_mix_scored']}")
+    print(f"    confidence_mix={funnel['confidence_mix']}")
+    print(
+        "    smtp: "
+        f"attempted={funnel['smtp']['attempted']} "
+        f"accepted={funnel['smtp']['accepted']} "
+        f"rejected={funnel['smtp']['rejected']} "
+        f"unknown={funnel['smtp']['unknown']} "
+        f"not_attempted={funnel['smtp']['not_attempted']}"
+    )
+    print(f"    smtp_statuses={funnel['smtp']['attempt_status']}")
+    print(f"    top_reject_reasons={funnel['reject_reasons']}")
+
+    # Hard run contract evaluation
+    contract_failed = False
+    contract_eval = {}
+    if contract_enabled:
+        scored_rows = load_csv_rows(contacts_scored)
+        contract_eval = evaluate_run_contract(scored_rows, contract)
+        contract_failed = not contract_eval.get('passed', False)
+
+        print("\n  🧭 Run contract evaluation:")
+        print(
+            "    "
+            f"eligible_contacts({contract_eval.get('allowed_levels', [])})={contract_eval.get('eligible_contacts', 0)} "
+            f"unique_companies={contract_eval.get('unique_companies', 0)}"
+        )
+        print(f"    signal_unique_companies={contract_eval.get('signal_company_counts', {})}")
+        if contract_failed:
+            print("    ❌ CONTRACT FAILED")
+            for d in contract_eval.get('deficits', []):
+                print(f"      - {d}")
+        else:
+            print("    ✅ CONTRACT PASSED")
+
+        write_contract_report(
+            contract_report,
+            {
+                'generated_at': datetime.now().isoformat(),
+                'input': sos,
+                'output_dir': out_dir,
+                'contract': contract,
+                'input_profile': input_profile,
+                'signal_diagnostics': {
+                    'lawsuits': lawsuit_diag,
+                    'rebrands': rebrand_diag,
+                    'hiring': hiring_diag,
+                    'refresh': refresh_diag,
+                },
+                'evaluation': contract_eval,
+                'pipeline_failed': failed,
+                'funnel': funnel,
+            },
+        )
+        print(f"    report={contract_report}")
+
+    # Always write daily KPI report, even when contract gates are disabled.
+    write_contract_report(
+        daily_kpi_report,
+        {
+            'generated_at': datetime.now().isoformat(),
+            'input': sos,
+            'output_dir': out_dir,
+            'pipeline_failed': failed,
+            'contract_enabled': contract_enabled,
+            'contract_failed': contract_failed,
+            'input_profile': input_profile,
+            'signal_diagnostics': {
+                'lawsuits': lawsuit_diag,
+                'rebrands': rebrand_diag,
+                'hiring': hiring_diag,
+                'refresh': refresh_diag,
+            },
+            'funnel': funnel,
+            'contract_evaluation': contract_eval,
+        },
+    )
+    print(f"  📄 Daily KPI report: {daily_kpi_report}")
+
+    if not failed and not contract_failed:
         print(f"\n  🎯 Ready: {hubspot}")
         print(f"     Import into HubSpot → Contacts → Import → choose file\n")
 
+    if failed or contract_failed:
+        return 1
+    return 0
+
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
