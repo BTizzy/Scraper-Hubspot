@@ -67,12 +67,16 @@ def check(name, condition, detail=''):
 def test_config():
     print("\n🧪 trillium_config.py")
     check("EMAIL_PATTERNS has ≥5 patterns", len(EMAIL_PATTERNS) >= 5, f"got {len(EMAIL_PATTERNS)}")
-    check("SIGNALS has ≥4 signal types", len(SIGNALS) >= 4, f"got {len(SIGNALS)}")
+    check("SIGNALS has exactly 3 signal types", len(SIGNALS) == 3, f"got {len(SIGNALS)}")
+    check("SIGNALS contains business_change", 'business_change' in SIGNALS)
+    check("SIGNALS does not contain rebrand", 'rebrand' not in SIGNALS)
+    check("SIGNALS does not contain active_hiring", 'active_hiring' not in SIGNALS)
+    check("SIGNALS does not contain website_refresh", 'website_refresh' not in SIGNALS)
     check("VERIFICATION_LEVELS has A/B/C/D", set(VERIFICATION_LEVELS.keys()) == {'A', 'B', 'C', 'D'})
     check("FRESHNESS_HALF_LIFE_DAYS is positive", FRESHNESS_HALF_LIFE_DAYS > 0)
     check("get_signal_priority('active_lawsuit') > 0", get_signal_priority('active_lawsuit') > 0)
-    check("rank_signals(['rebrand', 'active_lawsuit']) returns lawsuit first",
-          rank_signals(['rebrand', 'active_lawsuit'])[0] == 'active_lawsuit')
+    check("rank_signals(['business_change', 'active_lawsuit']) returns lawsuit first",
+          rank_signals(['business_change', 'active_lawsuit'])[0] == 'active_lawsuit')
     check("DM_TITLES contains 'owner'", 'owner' in DM_TITLES)
     check("GENERIC_LOCAL_PARTS contains 'info'", 'info' in GENERIC_LOCAL_PARTS)
     check("TARGET_CITIES contains 'seattle'", 'seattle' in TARGET_CITIES)
@@ -81,6 +85,8 @@ def test_config():
     check("Daily contract has hard_fail enabled", contract.get('hard_fail') is True)
     check("Daily contract min contacts is >= 50", int(contract.get('min_contacts_per_run', 0)) >= 50)
     check("Daily contract requires active_lawsuit signal", 'active_lawsuit' in contract.get('required_signals', []))
+    check("Daily contract requires business_change signal", 'business_change' in contract.get('required_signals', []))
+    check("Daily contract has exactly 3 required signals", len(contract.get('required_signals', [])) == 3)
 
 
 # ── Test: email_permutator ─────────────────────────────────────────────────────
@@ -266,12 +272,10 @@ def test_csv_roundtrip():
 
 # ── Test: new signal detectors ───────────────────────────────────────────────
 
-def test_new_signal_detectors():
-    print("\n🧪 new signal detectors")
+def test_signal_detectors():
+    print("\n🧪 signal detectors")
 
-    import find_active_hiring
     import find_lawsuits
-    import find_website_refresh
 
     # CourtListener should degrade cleanly when no API key is present.
     old_token = os.environ.pop('COURTLISTENER_API_KEY', None)
@@ -282,51 +286,12 @@ def test_new_signal_detectors():
         if old_token is not None:
             os.environ['COURTLISTENER_API_KEY'] = old_token
 
-    # Active hiring detector should identify careers-page keywords.
-    original_get = find_active_hiring.requests.get
-    class FakeResponse:
-        def __init__(self, status_code=200, text=''):
-            self.status_code = status_code
-            self.text = text
-
-    def fake_hiring_get(url, timeout=0, headers=None):
-        if url.endswith('/careers'):
-            return FakeResponse(200, '<html><body><h1>Careers</h1><p>We are hiring now. Apply now.</p></body></html>')
-        return FakeResponse(404, '')
-
-    find_active_hiring.requests.get = fake_hiring_get
-    try:
-        hiring = find_active_hiring.scan_careers_pages('https://example.com')
-        check("Active hiring detector finds careers keyword", hiring.get('found') is True, str(hiring))
-        check("Active hiring detector marks match status", hiring.get('status') == 'match', str(hiring))
-    finally:
-        find_active_hiring.requests.get = original_get
-
-    # Website refresh detector should accept a recent WHOIS update date.
-    original_whois = find_website_refresh.whois.whois
-    original_head = find_website_refresh.requests.head
-
-    class FakeWhois:
-        def __init__(self, updated_date):
-            self.updated_date = updated_date
-
-    def fake_whois_lookup(domain):
-        return FakeWhois(find_website_refresh.datetime.now())
-
-    def fake_head(url, timeout=0, headers=None, allow_redirects=True):
-        class FakeHeadResponse:
-            headers = {'Last-Modified': ''}
-        return FakeHeadResponse()
-
-    find_website_refresh.whois.whois = fake_whois_lookup
-    find_website_refresh.requests.head = fake_head
-    try:
-        refresh = find_website_refresh.detect_refresh('example.com')
-        check("Website refresh detector matches recent WHOIS", refresh.get('found') is True, str(refresh))
-        check("Website refresh detector uses WHOIS status", refresh.get('status') == 'match_whois', str(refresh))
-    finally:
-        find_website_refresh.whois.whois = original_whois
-        find_website_refresh.requests.head = original_head
+    # find_rebrands should tag as business_change (not rebrand)
+    from find_rebrands import extract_row_aliases, KEYWORDS
+    check("find_rebrands KEYWORDS includes 'sold'", 'sold' in KEYWORDS)
+    check("find_rebrands KEYWORDS includes 'acquired'", 'acquired' in KEYWORDS)
+    check("find_rebrands KEYWORDS includes 'under new management'", 'under new management' in KEYWORDS)
+    check("find_rebrands KEYWORDS includes 'business sale'", 'business sale' in KEYWORDS)
 
 
 def test_email_accuracy_guards():
@@ -341,7 +306,7 @@ def test_email_accuracy_guards():
         'verification_score': 'PASS',
         'smtp_ok': '',
         'catch_all': '',
-        'signal_tag': 'active_hiring',
+        'signal_tag': 'new_business',
         'collected_date': '2026-03-10',
     })
     check("Officer permutation without SMTP cannot be A/B", weak_guess['confidence_level'] in ('C', 'D'), str(weak_guess))
@@ -352,7 +317,7 @@ def test_email_accuracy_guards():
         'verification_score': 'PASS',
         'smtp_ok': 'ACCEPT',
         'catch_all': 'False',
-        'signal_tag': 'active_hiring',
+        'signal_tag': 'new_business',
         'collected_date': '2026-03-10',
     })
     check("Officer permutation with SMTP can exceed C", strong_guess['confidence_level'] in ('A', 'B', 'C'), str(strong_guess))
@@ -404,7 +369,7 @@ def test_qualification_by_confidence_tier():
             'smtp_ok': 'ACCEPT',
             'catch_all': 'FALSE',
             'collected_date': '2026-03-10',
-            'signal_tag': 'rebrand',
+            'signal_tag': 'business_change',
         })
         # Officer permutation without SMTP should be C or D
         writer.writerow({
@@ -418,7 +383,7 @@ def test_qualification_by_confidence_tier():
             'smtp_ok': '',
             'catch_all': '',
             'collected_date': '2026-03-10',
-            'signal_tag': 'website_refresh',
+            'signal_tag': 'new_business',
         })
         input_path = f.name
     
@@ -697,7 +662,7 @@ def test_build_input_pool_schema_and_dedupe():
         {
             'company_name': 'Acme Roofing LLC',
             'domain': 'acmeroofing.com',
-            'signal_tag': 'active_hiring',
+            'signal_tag': 'business_change',
         },
         source_name='search:test_search',
         company_col='company_name',
@@ -709,9 +674,132 @@ def test_build_input_pool_schema_and_dedupe():
 
     merged_row = merged[0]
     tags = set(t for t in merged_row.get('signal_tag', '').split(';') if t)
-    check("Pool merge unions signal tags", tags == {'new_business', 'active_hiring'}, str(merged_row))
+    check("Pool merge unions signal tags", tags == {'new_business', 'business_change'}, str(merged_row))
     sources = set(s for s in merged_row.get('source', '').split(';') if s)
     check("Pool merge unions sources", sources == {'manual:test_manual', 'search:test_search'}, str(merged_row))
+
+
+# ── Test: source modules (no network) ─────────────────────────────────────────
+
+def test_source_modules():
+    print("\n🧪 source modules (offline)")
+
+    # wa_sos_scraper: _normalize_api_result
+    from sources.wa_sos_scraper import _normalize_api_result
+
+    biz = {
+        "BusinessName": "Test Builders LLC",
+        "DateOfIncorporation": "2025-01-15",
+        "UBI": "123456789",
+        "BusinessType": "LLC",
+        "RegisteredAgent": "John Doe",
+        "Governors": [{"name": "Jane"}],
+        "Status": "Active",
+        "PrincipalOffice": "123 Main St",
+    }
+    result = _normalize_api_result(biz)
+    check("wa_sos: normalizes API result", result is not None)
+    check("wa_sos: company_name set", result["company_name"] == "Test Builders LLC")
+    check("wa_sos: signal_tag is new_business", result["signal_tag"] == "new_business")
+    check("wa_sos: source is wa_sos", result["source"] == "wa_sos")
+    check("wa_sos: state is WA", result["state"] == "WA")
+    check("wa_sos: empty name returns None", _normalize_api_result({"BusinessName": ""}) is None)
+
+    # opencorporates_source: _normalize_api_result
+    from sources.opencorporates_source import _normalize_api_result as oc_normalize
+
+    oc_company = {
+        "name": "Pacific Roofing Inc",
+        "company_number": "OC-999",
+        "incorporation_date": "2025-02-01",
+        "jurisdiction_code": "us_wa",
+        "company_type": "Corporation",
+        "current_status": "Active",
+        "previous_names": [],
+    }
+    oc_result = oc_normalize(oc_company)
+    check("opencorp: normalizes result", oc_result is not None)
+    check("opencorp: signal_tag is new_business", oc_result["signal_tag"] == "new_business")
+    check("opencorp: source is opencorporates", oc_result["source"] == "opencorporates")
+
+    # with previous_names → business_change
+    oc_company_renamed = {**oc_company, "previous_names": [{"company_name": "Old Name"}]}
+    oc_renamed = oc_normalize(oc_company_renamed)
+    check("opencorp: previous_names adds business_change",
+          "business_change" in oc_renamed["signal_tag"] and "new_business" in oc_renamed["signal_tag"])
+
+    check("opencorp: empty name returns None", oc_normalize({"name": ""}) is None)
+
+    # courtlistener_source: collect with empty names returns empty
+    from sources.courtlistener_source import collect as cl_collect
+
+    check("courtlistener: empty names returns []", cl_collect({}) == [])
+    check("courtlistener: no company_names key returns []", cl_collect({"days": 30}) == [])
+
+    # web_discovery: _build_queries, _extract_company_name, _extract_company
+    from sources.web_discovery import _build_queries, _extract_company_name, _extract_company
+
+    queries = _build_queries("WA", 2026)
+    check("web_discovery: builds 4 queries", len(queries) == 4, f"got {len(queries)}")
+    signal_types = {q[1] for q in queries}
+    check("web_discovery: covers all 3 signals", signal_types == {"new_business", "active_lawsuit", "business_change"})
+
+    name = _extract_company_name("Northwest Builders LLC filed for incorporation")
+    check("web_discovery: extracts LLC company name", name == "Northwest Builders LLC", f"got '{name}'")
+
+    check("web_discovery: no suffix returns empty", _extract_company_name("some random text") == "")
+
+    # _extract_company with lawsuit signal
+    lawsuit_result = _extract_company(
+        {"title": "Acme Corp sued for damages", "snippet": "lawsuit filed against Acme Corp in WA court", "url": ""},
+        "active_lawsuit", "WA",
+    )
+    check("web_discovery: extracts lawsuit company", lawsuit_result is not None and lawsuit_result["signal_tag"] == "active_lawsuit")
+
+    # _extract_company rejects when no signal terms
+    no_match = _extract_company(
+        {"title": "Acme Corp annual report", "snippet": "normal business operations", "url": ""},
+        "active_lawsuit", "WA",
+    )
+    check("web_discovery: rejects without lawsuit terms", no_match is None)
+
+
+def test_collect_from_web_utils():
+    print("\n🧪 collect_from_web utilities")
+
+    from collect_from_web import normalize_company_name, merge_signal_tags, merge_sources, deduplicate
+
+    # normalize_company_name
+    check("normalize: strips LLC", normalize_company_name("Acme Roofing LLC") == "acme roofing")
+    check("normalize: strips Inc.", normalize_company_name("Test Solutions Inc.") == "test solutions")
+    check("normalize: empty returns empty", normalize_company_name("") == "")
+    check("normalize: case insensitive", normalize_company_name("PACIFIC BUILDERS LLC") == "pacific builders")
+
+    # merge_signal_tags
+    check("merge_tags: combines two", merge_signal_tags("new_business", "active_lawsuit") in
+          ("active_lawsuit;new_business", "new_business;active_lawsuit"))
+    check("merge_tags: dedupes", merge_signal_tags("new_business", "new_business") == "new_business")
+    check("merge_tags: handles empty", merge_signal_tags("", "new_business") == "new_business")
+
+    # merge_sources
+    check("merge_sources: combines two", len(merge_sources("wa_sos", "opencorporates").split(";")) == 2)
+    check("merge_sources: dedupes", merge_sources("wa_sos", "wa_sos") == "wa_sos")
+
+    # deduplicate
+    companies = [
+        {"company_name": "Acme Roofing LLC", "source": "wa_sos", "signal_tag": "new_business", "registered_date": "2025-01-01"},
+        {"company_name": "Acme Roofing LLC", "source": "opencorporates", "signal_tag": "business_change", "registered_date": ""},
+        {"company_name": "Pacific Builders Inc", "source": "wa_sos", "signal_tag": "new_business", "registered_date": "2025-02-01"},
+    ]
+    deduped = deduplicate(companies)
+    check("deduplicate: merges same company", len(deduped) == 2, f"got {len(deduped)}")
+
+    acme = [c for c in deduped if "acme" in c["company_name"].lower()][0]
+    acme_tags = set(acme["signal_tag"].split(";"))
+    check("deduplicate: merges signal_tags", acme_tags == {"new_business", "business_change"}, str(acme_tags))
+    acme_sources = set(acme["source"].split(";"))
+    check("deduplicate: merges sources", acme_sources == {"wa_sos", "opencorporates"}, str(acme_sources))
+    check("deduplicate: keeps richer registered_date", acme["registered_date"] == "2025-01-01")
 
 
 # ── Run all tests ──────────────────────────────────────────────────────────────
@@ -726,7 +814,7 @@ def main():
     test_waterfall_enricher()
     test_freshness_scorer()
     test_csv_roundtrip()
-    test_new_signal_detectors()
+    test_signal_detectors()
     test_email_accuracy_guards()
     test_qualification_by_confidence_tier()
     test_hubspot_export_gates()

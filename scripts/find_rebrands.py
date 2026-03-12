@@ -1,9 +1,8 @@
 """find_rebrands.py
 
-Detect potential rebrands using a two-tier strategy:
-  1. OpenCorporates API for previous/alternate names (requires API key)
-  2. OpenCorporates HTML scraper fallback (no API key needed)
-  3. Website keyword scan for rebrand evidence
+Detect business changes (rebrands, transfers, sales, DBA filings) using a multi-tier strategy:
+  1. Row-native alias/history columns from SOS or upstream registries
+  2. Website keyword scan for business change evidence
 
 Input: companies_enriched.csv (expects `company_name` and optionally `opencorp_url`)
 Output: companies_rebrands.csv with columns: rebrand_flag, rebrand_reason, rebrand_sample
@@ -21,7 +20,12 @@ OPENCORP_SEARCH = "https://api.opencorporates.com/v0.4/companies/search?q={q}&ju
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
 
-KEYWORDS = ['formerly', 'formerly known as', 'rebrand', 'rebranded', 'now called', 'previously known as', 'formerly called', 'dba', 'doing business as', 'trade name']
+KEYWORDS = [
+    'formerly', 'formerly known as', 'rebrand', 'rebranded', 'now called',
+    'previously known as', 'formerly called', 'dba', 'doing business as',
+    'trade name', 'sold', 'acquired', 'under new management', 'merged',
+    'transfer', 'new ownership', 'business sale',
+]
 ALIAS_COLUMN_PATTERN = re.compile(r'(previous|former|old|alternate|trade|dba).*(name)?', re.IGNORECASE)
 LEGAL_SUFFIX_PATTERN = re.compile(r'\b(llc|inc|corp|corporation|co|company|ltd|limited|pllc|lp|llp|group|services|holdings)\b', re.IGNORECASE)
 
@@ -284,8 +288,12 @@ def scan_website_for_keywords(domain):
             }
         text = r.text.lower()
         
-        # Prioritize strong rebrand signals: "rebranded to", "formerly", "trading as" with context
-        strong_signals = ['rebranded to', 'formerly known as', 'trading as']
+        # Prioritize strong business change signals
+        strong_signals = [
+            'rebranded to', 'formerly known as', 'trading as',
+            'acquired by', 'merged with', 'under new management',
+            'new ownership', 'business sold', 'business sale',
+        ]
         for signal in strong_signals:
             pattern = r'\b' + re.escape(signal) + r'\b'
             match = re.search(pattern, text, re.IGNORECASE)
@@ -441,8 +449,8 @@ def find(input_csv, output_csv):
 
             # ── Append signal tag ──
             existing_signals = [s.strip() for s in (row.get('signal_tag', '') or '').split(';') if s.strip()]
-            if rebrand_flag == 'TRUE' and 'rebrand' not in existing_signals:
-                existing_signals.append('rebrand')
+            if rebrand_flag == 'TRUE' and 'business_change' not in existing_signals:
+                existing_signals.append('business_change')
                 rebrand_count += 1
                 signal_appends += 1
                 print(f"  🔔 {name}: rebrand detected — {reason}")
