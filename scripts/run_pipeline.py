@@ -3,19 +3,22 @@
 End-to-end orchestrator inspired by Apollo's data pipeline:
   1. Company enrichment     (OpenCorporates + WA SOS)
   2. Headcount estimation   (team page spider)
-  3. Buying-signal detection (lawsuits + rebrands)
-  4. Waterfall enrichment   (5-source contact discovery)
-  5. Email verification     (MX + SMTP + catch-all)
-  6. Freshness scoring      (A/B/C/D confidence tiers)
-  7. HubSpot CSV builder    (quality-gated, import-ready)
+  3. Lawsuit detection      (CourtListener)
+  4. Business change detection (rebrands, transfers, DBA filings)
+  5. Waterfall enrichment   (5-source contact discovery)
+  6. Email verification     (MX + SMTP + catch-all)
+  7. Freshness scoring      (A/B/C/D confidence tiers)
+  8. HubSpot CSV builder    (quality-gated, import-ready)
 
 Usage:
   python run_pipeline.py --sos sos_export.csv
   python run_pipeline.py --sos sos_export.csv --smtp --hunter-key YOUR_KEY
   python run_pipeline.py --sos sos_export.csv --skip-theharvester --skip-dorks --min-level B
+  python run_pipeline.py --collect-from-web --min-level C
 
 Flags:
-  --sos               WA SOS CSV export (required)
+  --sos               WA SOS CSV export (or use --collect-from-web)
+  --collect-from-web  Auto-collect companies from web sources before pipeline
   --smtp              Enable SMTP RCPT verification (slow but more accurate)
   --hunter-key        Hunter.io API key (25 free/month)
   --skip-theharvester Skip theHarvester source
@@ -329,7 +332,13 @@ Examples:
   python run_pipeline.py --sos sos_export.csv --skip-theharvester --skip-dorks --min-level B
         '''
     )
-    parser.add_argument('--sos', required=True, help='WA SOS CSV export file')
+    parser.add_argument('--sos', default='', help='WA SOS CSV export file (or use --collect-from-web)')
+    parser.add_argument('--collect-from-web', action='store_true',
+                        help='Auto-collect companies from web sources before pipeline')
+    parser.add_argument('--collect-days', type=int, default=90,
+                        help='Lookback days for web collection (default: 90)')
+    parser.add_argument('--collect-state', default='WA',
+                        help='Target state for web collection (default: WA)')
     parser.add_argument('--smtp', action='store_true', help='Enable SMTP RCPT verification')
     parser.add_argument('--hunter-key', default='', help='Hunter.io API key')
     parser.add_argument('--skip-theharvester', action='store_true', help='Skip theHarvester')
@@ -342,6 +351,27 @@ Examples:
                         help='Disable hard daily run contract checks')
     args = parser.parse_args()
 
+    # Run web collection if requested
+    if args.collect_from_web:
+        out_dir = os.path.abspath(args.output_dir)
+        os.makedirs(out_dir, exist_ok=True)
+        collected_csv = os.path.join(out_dir, 'companies_web_collected.csv')
+        collect_cmd = [
+            py, os.path.join(SCRIPTS_DIR, 'collect_from_web.py'),
+            '--output', collected_csv,
+            '--days', str(args.collect_days),
+            '--state', args.collect_state,
+        ]
+        print("  Running web collection...")
+        rc = subprocess.run(collect_cmd, cwd=SCRIPTS_DIR).returncode
+        if rc != 0:
+            print(f"  Web collection failed (exit code {rc})")
+            return 1
+        if not args.sos:
+            args.sos = collected_csv
+    elif not args.sos:
+        parser.error('--sos is required unless --collect-from-web is used')
+
     # Resolve paths
     sos = os.path.abspath(args.sos)
     out_dir = os.path.abspath(args.output_dir)
@@ -351,8 +381,6 @@ Examples:
     sized           = os.path.join(out_dir, 'companies_sized.csv')
     lawsuits        = os.path.join(out_dir, 'companies_lawsuits.csv')
     rebrands        = os.path.join(out_dir, 'companies_rebrands.csv')
-    hiring          = os.path.join(out_dir, 'companies_hiring.csv')
-    refresh         = os.path.join(out_dir, 'companies_refresh.csv')
     contacts_raw    = os.path.join(out_dir, 'contacts_raw.csv')
     contacts_verified = os.path.join(out_dir, 'contacts_verified.csv')
     contacts_scored = os.path.join(out_dir, 'contacts_scored.csv')
@@ -381,7 +409,7 @@ Examples:
     steps.append(PipelineStep(2, 'Headcount Estimation',
         [py, os.path.join(SCRIPTS_DIR, 'estimate_headcount.py'),
          '--input', enriched, '--output', sized],
-        'Crawl team pages to estimate 5-30 employee range'))
+        'Crawl team pages to estimate 5-25 employee range'))
 
     # Step 3: Lawsuit signal detection
     steps.append(PipelineStep(3, 'Lawsuit Detection',
@@ -389,28 +417,16 @@ Examples:
          '--input', sized, '--output', lawsuits],
         'CourtListener search for active litigation'))
 
-    # Step 4: Rebrand detection
-    steps.append(PipelineStep(4, 'Rebrand Detection',
+    # Step 4: Business change detection (rebrands, transfers, DBA filings)
+    steps.append(PipelineStep(4, 'Business Change Detection',
         [py, os.path.join(SCRIPTS_DIR, 'find_rebrands.py'),
          '--input', lawsuits, '--output', rebrands],
-        'OpenCorporates previous names + website keyword scan'))
+        'Detect rebrands, transfers, sales, DBA filings via website keywords'))
 
-    # Step 5: Active hiring detection
-    steps.append(PipelineStep(5, 'Active Hiring Detection',
-        [py, os.path.join(SCRIPTS_DIR, 'find_active_hiring.py'),
-         '--input', rebrands, '--output', hiring],
-        'Careers pages and job-posting heuristics'))
-
-    # Step 6: Website refresh detection
-    steps.append(PipelineStep(6, 'Website Refresh Detection',
-        [py, os.path.join(SCRIPTS_DIR, 'find_website_refresh.py'),
-         '--input', hiring, '--output', refresh],
-        'WHOIS update dates + HTTP Last-Modified heuristics'))
-
-    # Step 7: Waterfall contact enrichment (NEW)
+    # Step 5: Waterfall contact enrichment
     waterfall_cmd = [
         py, os.path.join(SCRIPTS_DIR, 'waterfall_enricher.py'),
-        '--input', refresh, '--output', contacts_raw
+        '--input', rebrands, '--output', contacts_raw
     ]
     if args.skip_theharvester:
         waterfall_cmd.append('--skip-theharvester')
@@ -418,30 +434,30 @@ Examples:
         waterfall_cmd.append('--skip-dorks')
     if args.hunter_key:
         waterfall_cmd.extend(['--hunter-key', args.hunter_key])
-    steps.append(PipelineStep(7, 'Waterfall Contact Enrichment',
+    steps.append(PipelineStep(5, 'Waterfall Contact Enrichment',
         waterfall_cmd,
         '5-source cascade: theHarvester → team pages → officer permutation → Hunter.io → dorks'))
 
-    # Step 8: Email verification
+    # Step 6: Email verification
     verify_cmd = [
         py, os.path.join(SCRIPTS_DIR, 'verify_emails.py'),
         '--input', contacts_raw, '--output', contacts_verified
     ]
     if args.smtp:
         verify_cmd.append('--smtp')
-    steps.append(PipelineStep(8, 'Email Verification',
+    steps.append(PipelineStep(6, 'Email Verification',
         verify_cmd,
         'MX + domain age' + (' + SMTP RCPT + catch-all' if args.smtp else '')))
 
-    # Step 9: Freshness scoring (NEW)
-    steps.append(PipelineStep(9, 'Freshness Scoring',
+    # Step 7: Freshness scoring
+    steps.append(PipelineStep(7, 'Freshness Scoring',
         [py, os.path.join(SCRIPTS_DIR, 'freshness_scorer.py'),
          '--input', contacts_verified, '--output', contacts_scored,
          '--min-level', args.min_level],
         f'Score by source quality + verification + recency → filter ≥{args.min_level}'))
 
-    # Step 10: HubSpot CSV builder
-    steps.append(PipelineStep(10, 'HubSpot CSV Builder',
+    # Step 8: HubSpot CSV builder
+    steps.append(PipelineStep(8, 'HubSpot CSV Builder',
         [py, os.path.join(SCRIPTS_DIR, 'build_csv.py'),
          '--input', contacts_scored.replace('.csv', '_qualified.csv'),
          '--output', hubspot,
@@ -529,9 +545,7 @@ Examples:
         ('Companies enriched', enriched),
         ('Companies sized', sized),
         ('Lawsuit signals', lawsuits),
-        ('Rebrand signals', rebrands),
-        ('Hiring signals', hiring),
-        ('Refresh signals', refresh),
+        ('Business change signals', rebrands),
         ('Contacts (raw)', contacts_raw),
         ('Contacts (verified)', contacts_verified),
         ('Contacts (scored)', contacts_scored),
@@ -569,24 +583,12 @@ Examples:
     )
     rebrand_diag = summarize_signal_stage(
         rebrands,
-        signal_name='rebrand',
+        signal_name='business_change',
         status_col='rebrand_query_status',
         error_col='rebrand_error',
     )
-    hiring_diag = summarize_signal_stage(
-        hiring,
-        signal_name='active_hiring',
-        status_col='hiring_query_status',
-        error_col='hiring_error',
-    )
-    refresh_diag = summarize_signal_stage(
-        refresh,
-        signal_name='website_refresh',
-        status_col='website_refresh_status',
-        error_col='website_refresh_error',
-    )
 
-    if lawsuit_diag['rows'] > 0 or rebrand_diag['rows'] > 0 or hiring_diag['rows'] > 0 or refresh_diag['rows'] > 0:
+    if lawsuit_diag['rows'] > 0 or rebrand_diag['rows'] > 0:
         print("\n  🔎 Signal diagnostics:")
     if lawsuit_diag['rows'] > 0:
         print(
@@ -601,35 +603,17 @@ Examples:
 
     if rebrand_diag['rows'] > 0:
         print(
-            "    rebrands: "
+            "    business_change: "
             f"rows={rebrand_diag['rows']} "
-            f"rebrand={rebrand_diag['signal_hits']} "
+            f"business_change={rebrand_diag['signal_hits']} "
             f"problem_rows={rebrand_diag['problem_rows']} "
             f"new_business_only={rebrand_diag['new_business_only']}"
         )
         print(f"      query_statuses={rebrand_diag['status_counts']}")
         if rebrand_diag['signal_hits'] == 0 and rebrand_diag['problem_rows'] > 0:
-            print("      ⚠ no rebrand signals and rebrand API/problem rows were detected")
+            print("      ⚠ no business_change signals and API/problem rows were detected")
         if rebrand_diag['new_business_only'] == rebrand_diag['rows'] and rebrand_diag['rows'] > 0:
             print("      ⚠ every record remained new_business-only; check dataset maturity and API availability")
-
-    if hiring_diag['rows'] > 0:
-        print(
-            "    hiring: "
-            f"rows={hiring_diag['rows']} "
-            f"active_hiring={hiring_diag['signal_hits']} "
-            f"problem_rows={hiring_diag['problem_rows']}"
-        )
-        print(f"      statuses={hiring_diag['status_counts']}")
-
-    if refresh_diag['rows'] > 0:
-        print(
-            "    refresh: "
-            f"rows={refresh_diag['rows']} "
-            f"website_refresh={refresh_diag['signal_hits']} "
-            f"problem_rows={refresh_diag['problem_rows']}"
-        )
-        print(f"      statuses={refresh_diag['status_counts']}")
 
     # Funnel diagnostics for A/B throughput bottlenecks
     raw_rows = load_csv_rows(contacts_raw)
@@ -692,9 +676,7 @@ Examples:
                 'input_profile': input_profile,
                 'signal_diagnostics': {
                     'lawsuits': lawsuit_diag,
-                    'rebrands': rebrand_diag,
-                    'hiring': hiring_diag,
-                    'refresh': refresh_diag,
+                    'business_change': rebrand_diag,
                 },
                 'evaluation': contract_eval,
                 'pipeline_failed': failed,
@@ -716,9 +698,7 @@ Examples:
             'input_profile': input_profile,
             'signal_diagnostics': {
                 'lawsuits': lawsuit_diag,
-                'rebrands': rebrand_diag,
-                'hiring': hiring_diag,
-                'refresh': refresh_diag,
+                'business_change': rebrand_diag,
             },
             'funnel': funnel,
             'contract_evaluation': contract_eval,

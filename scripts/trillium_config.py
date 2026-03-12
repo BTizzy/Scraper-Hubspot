@@ -25,7 +25,7 @@ TARGET_STATE_FULL = "Washington"
 
 # ── Company Size ───────────────────────────────────────────────────────────────
 MIN_EMPLOYEES = 5
-MAX_EMPLOYEES = 30
+MAX_EMPLOYEES = 25
 
 # ── Decision-Maker Titles ──────────────────────────────────────────────────────
 # Used for LinkedIn/team-page filtering and email prioritization
@@ -54,33 +54,18 @@ VERTICALS = [
 SIGNALS = {
     "active_lawsuit": {
         "priority": 100,
-        "description": "Active civil litigation in King County — urgent HR/compliance pain",
-        "sources": ["courtlistener_v4", "duckduckgo_courtlistener_dork", "king_county_courts"],
+        "description": "Active civil litigation — urgent HR/compliance pain",
+        "sources": ["courtlistener_v4", "duckduckgo_courtlistener_dork", "courtlistener_source"],
     },
     "new_business": {
         "priority": 90,
-        "description": "WA SOS new entity filing within last 18 months — building tech stack",
-        "sources": ["wa_sos_ccfs"],
+        "description": "New entity filing within last 18 months — building tech stack",
+        "sources": ["wa_sos_ccfs", "wa_sos_scraper", "opencorporates_api", "web_discovery"],
     },
-    "rebrand": {
+    "business_change": {
         "priority": 85,
-        "description": "Company name change or 'formerly known as' — new vendor selection window",
-        "sources": ["opencorporates_api", "opencorporates_html", "website_copy"],
-    },
-    "formation_with_employees": {
-        "priority": 80,
-        "description": "New entity that already has 5-30 employees — immediate staffing need",
-        "sources": ["wa_sos_ccfs", "team_page_spider", "linkedin"],
-    },
-    "active_hiring": {
-        "priority": 70,
-        "description": "Open job postings in last 30 days — confirmed growth",
-        "sources": ["company_careers_page", "job_posting_heuristics"],
-    },
-    "website_refresh": {
-        "priority": 50,
-        "description": "Domain registered/redesigned recently — active investment in brand",
-        "sources": ["whois", "http_last_modified"],
+        "description": "Business transfer, sale, rename, rebrand, or DBA filing — new vendor selection window",
+        "sources": ["opencorporates_api", "wa_sos", "web_discovery"],
     },
 }
 

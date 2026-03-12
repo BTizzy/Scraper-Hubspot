@@ -1,5 +1,10 @@
 """find_active_hiring.py
 
+DEPRECATED: This module has been removed from the pipeline as of the signal
+simplification (3-signal model: new_business, active_lawsuit, business_change).
+The active_hiring signal was determined to be a weak indicator. This file is
+kept in the repository for reference but is no longer invoked by run_pipeline.py.
+
 Detect active hiring signals using company careers pages and job-board search.
 
 Input: companies_rebrands.csv with `company_name` and optional `website`/`domain`.

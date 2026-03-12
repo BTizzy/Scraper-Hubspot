@@ -1,5 +1,10 @@
 """find_website_refresh.py
 
+DEPRECATED: This module has been removed from the pipeline as of the signal
+simplification (3-signal model: new_business, active_lawsuit, business_change).
+The website_refresh signal was determined to be a weak indicator. This file is
+kept in the repository for reference but is no longer invoked by run_pipeline.py.
+
 Detect website refresh signals using WHOIS update dates and HTTP Last-Modified.
 
 Input: companies_hiring.csv with `domain` or `website`.

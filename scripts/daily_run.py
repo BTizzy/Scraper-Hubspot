@@ -11,6 +11,7 @@ What this script adds:
 Usage:
   python daily_run.py --sos sos_export.csv
   python daily_run.py --sos sos_export.csv --smtp --min-level B
+  python daily_run.py --collect-from-web --days 90 --min-level C
 """
 
 from __future__ import annotations
@@ -133,7 +134,13 @@ def filter_hubspot_novel(hubspot_path: Path, seen_emails: set[str]) -> tuple[lis
 
 def main() -> int:
     parser = argparse.ArgumentParser(description='Daily wrapper for run_pipeline.py with cross-day de-dup controls')
-    parser.add_argument('--sos', required=True, help='WA SOS input CSV')
+    parser.add_argument('--sos', default='', help='WA SOS input CSV (or use --collect-from-web)')
+    parser.add_argument('--collect-from-web', action='store_true',
+                        help='Auto-collect companies from web sources before pipeline')
+    parser.add_argument('--collect-days', type=int, default=90,
+                        help='Lookback days for web collection (default: 90)')
+    parser.add_argument('--collect-state', default='WA',
+                        help='Target state for web collection (default: WA)')
     parser.add_argument('--state-dir', default='state', help='Directory for seen companies/emails state')
     parser.add_argument('--output-root', default='daily_output', help='Root folder for date-stamped pipeline outputs')
     parser.add_argument('--run-name', default='', help='Optional suffix for output folder name')
@@ -148,9 +155,31 @@ def main() -> int:
     args = parser.parse_args()
 
     scripts_dir = Path(__file__).resolve().parent
-    sos_path = Path(args.sos).resolve()
     state_dir = (scripts_dir / args.state_dir).resolve()
     output_root = (scripts_dir / args.output_root).resolve()
+
+    # Run web collection if requested
+    if args.collect_from_web:
+        collected_csv = output_root / 'web_collected.csv'
+        collected_csv.parent.mkdir(parents=True, exist_ok=True)
+        collect_cmd = [
+            sys.executable,
+            str(scripts_dir / 'collect_from_web.py'),
+            '--output', str(collected_csv),
+            '--days', str(args.collect_days),
+            '--state', args.collect_state,
+        ]
+        print("Running web collection...")
+        rc = subprocess.run(collect_cmd, cwd=str(scripts_dir)).returncode
+        if rc != 0:
+            print(f'Web collection failed (exit code {rc})')
+            return rc
+        if not args.sos:
+            args.sos = str(collected_csv)
+    elif not args.sos:
+        parser.error('--sos is required unless --collect-from-web is used')
+
+    sos_path = Path(args.sos).resolve()
 
     seen_companies_path = state_dir / 'seen_companies.csv'
     seen_emails_path = state_dir / 'seen_emails.csv'
