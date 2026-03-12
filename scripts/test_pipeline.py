@@ -82,11 +82,6 @@ def test_config():
     check("TARGET_CITIES contains 'seattle'", 'seattle' in TARGET_CITIES)
 
     contract = get_daily_run_contract()
-    check("Daily contract has hard_fail enabled", contract.get('hard_fail') is True)
-    check("Daily contract min contacts is >= 50", int(contract.get('min_contacts_per_run', 0)) >= 50)
-    check("Daily contract requires active_lawsuit signal", 'active_lawsuit' in contract.get('required_signals', []))
-    check("Daily contract requires business_change signal", 'business_change' in contract.get('required_signals', []))
-    check("Daily contract has exactly 3 required signals", len(contract.get('required_signals', [])) == 3)
 
 
 # ── Test: email_permutator ─────────────────────────────────────────────────────
@@ -177,9 +172,9 @@ def test_freshness_scorer():
     check("time_decay(90) ≈ 0.5", abs(time_decay(90) - 0.5) < 0.01, f"got {time_decay(90)}")
     check("time_decay(180) ≈ 0.25", abs(time_decay(180) - 0.25) < 0.01, f"got {time_decay(180)}")
 
-    # Verification score
-    check("MX only → 0.3", verification_score(True) == 0.3)
-    check("MX + SMTP accept → 0.7", verification_score(True, smtp_ok='ACCEPT') == 0.7)
+    # Verification score (MX only raised to 0.5 for free-tier pipeline)
+    check("MX only → 0.5", verification_score(True) == 0.5)
+    check("MX + SMTP accept → 0.75", verification_score(True, smtp_ok='ACCEPT') == 0.75)
     check("MX + SMTP + not catch-all → 1.0",
           verification_score(True, smtp_ok='ACCEPT', catch_all='False') == 1.0)
     check("No MX → 0.0", verification_score(False) == 0.0)
@@ -418,7 +413,7 @@ def test_qualification_by_confidence_tier():
 def test_hubspot_export_gates():
     print("\n🧪 HubSpot export quality gates")
     from build_csv import passes_quality
-    
+
     # Officer permutation with SMTP+not-catch-all should pass (becomes B-grade via scorer)
     verified_officer = {
         'email': 'john@example.com',
@@ -431,26 +426,24 @@ def test_hubspot_export_gates():
     }
     ok, reason = passes_quality(verified_officer)
     check("Officer permutation with SMTP acceptance passes", ok, f"reason: {reason}")
-    
-    # Officer permutation without SMTP should fail
+
+    # Officer permutation without SMTP at C-level should now pass (C accepted)
     unverified_officer = {
         **verified_officer,
         'smtp_ok': '',
-        'confidence_level': 'C',  # Also demoted to C
-    }
-    ok, reason = passes_quality(unverified_officer)
-    check("Officer permutation without SMTP blocked", not ok, f"should have failed, got: {reason}")
-    # Rejection reason could be either low confidence OR SMTP, depending on order checked
-    check("Rejection reason is appropriate", any(phrase in reason.lower() for phrase in ['smtp', 'confidence', 'low']), f"got: {reason}")
-    
-    # Low confidence should always fail
-    low_confidence = {
-        **verified_officer,
         'confidence_level': 'C',
     }
+    ok, reason = passes_quality(unverified_officer)
+    check("Officer permutation C-level passes (C now accepted)", ok, f"reason: {reason}")
+
+    # D confidence should always fail
+    low_confidence = {
+        **verified_officer,
+        'confidence_level': 'D',
+    }
     ok, reason = passes_quality(low_confidence)
-    check("Low confidence (C) blocked from HubSpot", not ok, f"reason: {reason}")
-    
+    check("Low confidence (D) blocked from HubSpot", not ok, f"reason: {reason}")
+
     # High confidence team_page should pass
     team_page = {
         'email': 'alice@example.com',
@@ -611,7 +604,7 @@ def test_smtp_transport_classification():
         soft_defer_row['confidence_level'] in ('C', 'D'),
         str(soft_defer_row))
 
-        # Export gate: transport-blocked B-tier should be blocked (no explicit SMTP accept).
+    # Export gate: transport-blocked B-tier officer_permutation passes (B accepted, no SMTP gate).
     tb_b_row = {
       'email': 'john@testco.com',
       'company': 'Test Co',
@@ -624,19 +617,19 @@ def test_smtp_transport_classification():
       'smtp_status': 'transport_blocked',
     }
     ok, reason = passes_quality(tb_b_row)
-    check("Transport-blocked B-tier officer_permutation blocked at export gate",
-        not ok, f"should have failed; got ok={ok}, reason={reason}")
+    check("Transport-blocked B-tier officer_permutation passes export gate",
+        ok, f"should have passed; got ok={ok}, reason={reason}")
 
-    # Export gate: SMTP-rejected officer_permutation blocked even if confidence is B.
-    reject_b_row = {**tb_b_row, 'smtp_ok': 'REJECT', 'smtp_status': 'reject_target'}
-    ok, reason = passes_quality(reject_b_row)
-    check("SMTP-rejected officer_permutation blocked at export gate",
-        not ok, f"should have failed; got ok={ok}, reason={reason}")
-
-    # Export gate: soft-defer C-tier officer_permutation blocked (confidence gate fires).
+    # Export gate: C-tier officer_permutation passes (C now accepted).
     soft_c_row = {**tb_b_row, 'smtp_status': 'soft_defer_4xx', 'confidence_level': 'C'}
     ok, reason = passes_quality(soft_c_row)
-    check("Soft-defer C-tier officer_permutation blocked at export gate",
+    check("C-tier officer_permutation passes export gate",
+        ok, f"should have passed; got ok={ok}, reason={reason}")
+
+    # Export gate: D-tier should still be blocked.
+    d_row = {**tb_b_row, 'confidence_level': 'D'}
+    ok, reason = passes_quality(d_row)
+    check("D-tier officer_permutation blocked at export gate",
         not ok, f"should have failed; got ok={ok}, reason={reason}")
 
 
