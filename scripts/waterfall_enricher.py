@@ -460,6 +460,8 @@ def waterfall_enrich(domain: str, company: str = '', officers: list[dict] = None
                 c[key] = meta.get(key, '')
     # Deduplicate (first source wins — priority order matters)
     unique = deduplicate(all_contacts)
+    # Promote decision-makers to top
+    unique = filter_decision_makers(unique)
     print(f"  ✅ Total unique contacts: {len(unique)}")
     return unique
 
