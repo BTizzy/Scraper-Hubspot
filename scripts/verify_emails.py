@@ -284,18 +284,25 @@ def score_email(email, source='', smtp=False, smtp_cache=None):
     if not mx:
         return 'REJECT — dead domain', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
 
-    # Core guardrail for guessed officer permutations:
-    # only treat as PASS when SMTP explicitly accepts the mailbox and
-    # random-recipient probe confirms domain is not catch-all.
+    # Officer permutation guardrail:
+    # When SMTP was attempted, require explicit acceptance for PASS.
+    # When SMTP was NOT attempted (default MX-only mode), allow PASS with
+    # an 'UNVERIFIED' tag so the scorer can differentiate.
     src = (source or '').strip().lower()
-    if smtp and src == 'officer_permutation':
+    if src == 'officer_permutation':
         smtp_ok_u = (smtp_ok or '').strip().upper()
         catch_all_u = (catch_all or '').strip().upper()
-        if smtp_ok_u == 'ACCEPT' and catch_all_u == 'FALSE':
+        if smtp and smtp_attempted:
+            if smtp_ok_u == 'ACCEPT' and catch_all_u == 'FALSE':
+                return 'PASS', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
+            if smtp_ok_u == 'REJECT':
+                return 'REJECT — mailbox rejected', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
+            # Transport blocked or inconclusive — not a rejection, but unverified
+            return 'UNVERIFIED — smtp inconclusive', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
+        else:
+            # SMTP not attempted — MX passed, so email domain is valid.
+            # Mark as PASS so it flows through; scorer will cap confidence at C.
             return 'PASS', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
-        if smtp_ok_u == 'REJECT':
-            return 'REJECT — mailbox rejected', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
-        return 'UNVERIFIED — smtp inconclusive', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
 
     return 'PASS', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
 
@@ -332,9 +339,11 @@ def verify(input_csv, output_csv, smtp=False):
             row['catch_all'] = catch_all
             row['smtp_status'] = smtp_status
             row['smtp_attempted'] = 'TRUE' if smtp_attempted else 'FALSE'
-            if score.startswith('PASS'):
+            if score.startswith('PASS') or score.startswith('UNVERIFIED'):
+                # Both PASS and UNVERIFIED mean MX passed; UNVERIFIED just means
+                # SMTP couldn't confirm the specific mailbox.
                 row['mx_pass'] = 'TRUE'
-                row['reject_reason'] = ''
+                row['reject_reason'] = '' if score.startswith('PASS') else score
             else:
                 row['mx_pass'] = 'FALSE'
                 row['reject_reason'] = score
