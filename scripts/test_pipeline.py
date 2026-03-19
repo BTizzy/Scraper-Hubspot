@@ -677,26 +677,30 @@ def test_build_input_pool_schema_and_dedupe():
 def test_source_modules():
     print("\n🧪 source modules (offline)")
 
-    # wa_sos_scraper: _normalize_api_result
-    from sources.wa_sos_scraper import _normalize_api_result
+    # sos_scraper: _normalize_oregon_result
+    from sources.sos_scraper import _normalize_oregon_result
 
     biz = {
-        "BusinessName": "Test Builders LLC",
-        "DateOfIncorporation": "2025-01-15",
-        "UBI": "123456789",
-        "BusinessType": "LLC",
-        "RegisteredAgent": "John Doe",
-        "Governors": [{"name": "Jane"}],
-        "Status": "Active",
-        "PrincipalOffice": "123 Main St",
+        "business_name": "Test Builders LLC",
+        "registry_date": "2025-01-15T00:00:00.000",
+        "registry_number": "123456789",
+        "entity_type": "DOMESTIC LIMITED LIABILITY COMPANY",
+        "first_name": "John",
+        "last_name": "Doe",
+        "address_": "123 Main St",
+        "city": "Portland",
+        "state": "OR",
+        "zip_code": "97201",
     }
-    result = _normalize_api_result(biz)
-    check("wa_sos: normalizes API result", result is not None)
-    check("wa_sos: company_name set", result["company_name"] == "Test Builders LLC")
-    check("wa_sos: signal_tag is new_business", result["signal_tag"] == "new_business")
-    check("wa_sos: source is wa_sos", result["source"] == "wa_sos")
-    check("wa_sos: state is WA", result["state"] == "WA")
-    check("wa_sos: empty name returns None", _normalize_api_result({"BusinessName": ""}) is None)
+    result = _normalize_oregon_result(biz)
+    check("sos: normalizes Oregon result", result is not None)
+    check("sos: company_name set", result["company_name"] == "Test Builders LLC")
+    check("sos: signal_tag is new_business", result["signal_tag"] == "new_business")
+    check("sos: source is oregon_sos", result["source"] == "oregon_sos")
+    check("sos: state is OR", result["state"] == "OR")
+    check("sos: registered_date parsed", result["registered_date"] == "2025-01-15")
+    check("sos: empty name returns standard dict",
+          _normalize_oregon_result({"business_name": "", "registry_number": ""})["company_name"] == "")
 
     # opencorporates_source: _normalize_api_result
     from sources.opencorporates_source import _normalize_api_result as oc_normalize

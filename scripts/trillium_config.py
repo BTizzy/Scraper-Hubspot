@@ -60,7 +60,7 @@ SIGNALS = {
     "new_business": {
         "priority": 90,
         "description": "New entity filing within last 18 months — building tech stack",
-        "sources": ["wa_sos_ccfs", "wa_sos_scraper", "opencorporates_api", "web_discovery"],
+        "sources": ["oregon_sos", "sos_scraper", "opencorporates_api", "web_discovery", "courtlistener"],
     },
     "business_change": {
         "priority": 85,

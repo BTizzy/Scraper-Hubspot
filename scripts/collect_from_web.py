@@ -19,7 +19,7 @@ from datetime import datetime
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPTS_DIR)
 
-from sources import wa_sos_scraper, opencorporates_source, courtlistener_source, web_discovery
+from sources import sos_scraper, opencorporates_source, courtlistener_source, web_discovery
 
 
 OUTPUT_FIELDS = [
@@ -110,11 +110,11 @@ def collect_all(config: dict) -> list[dict]:
     """Run all source collectors and return merged results."""
     all_companies = []
 
-    # Source 1: WA SOS CCFS
-    print("\n  [1/4] WA Secretary of State CCFS...")
+    # Source 1: SOS Business Registrations (Oregon SODA API + WA CCFS fallback)
+    print("\n  [1/4] Secretary of State business registrations...")
     try:
-        wa_results = wa_sos_scraper.collect(config)
-        all_companies.extend(wa_results)
+        sos_results = sos_scraper.collect(config)
+        all_companies.extend(sos_results)
     except Exception as e:
         print(f"    Error: {e}")
 

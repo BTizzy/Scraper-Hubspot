@@ -22,12 +22,12 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
 # Patterns for extracting company names from search results
 COMPANY_SUFFIX = re.compile(
-    r"\b(LLC|Inc\.?|Corp\.?|Corporation|Co\.?|Company|Ltd\.?|PLLC|LP|LLP)\b",
+    r"\b(LLC|Inc\.?|Corp\.?|Corporation|Co\.|Company|Ltd\.?|PLLC|LP|LLP)\b",
     re.IGNORECASE,
 )
 
 LAWSUIT_TERMS = re.compile(
-    r"\b(lawsuit|litigation|defendant|plaintiff|sued|complaint|docket)\b",
+    r"\b(lawsuit|litigation|defendant|plaintiff|sued|complaint|docket|v\.\s)\b",
     re.IGNORECASE,
 )
 
@@ -35,6 +35,34 @@ CHANGE_TERMS = re.compile(
     r"\b(sold|acquired|under new management|merged|transfer|new ownership|business sale|rebranded?)\b",
     re.IGNORECASE,
 )
+
+# Blacklist common false-positive "company names" from form-filling sites, ads, how-to articles
+FALSE_POSITIVE_NAMES = {
+    "form your llc", "start your llc", "file your llc", "register your llc",
+    "your llc", "the llc", "my llc", "an llc", "new llc", "best llc",
+    "form an llc", "start an llc", "create an llc", "open an llc",
+    "how to form", "how to start", "how to file", "how to register",
+    "llc formation", "llc filing", "llc registration", "llc service",
+    "business formation", "legal zoom", "legalzoom", "incfile",
+    "northwest registered agent", "zenbusiness", "swyft filings",
+    "rocket lawyer", "bizfilings", "harbor compliance",
+    "registered agent", "statutory agent", "formation service",
+    "your business", "small business", "new business",
+    "example llc", "sample llc", "test llc", "demo llc",
+    "any company", "some company", "this company",
+}
+
+# Domains to skip (form-filling services, not actual companies)
+SKIP_DOMAINS = {
+    "legalzoom.com", "incfile.com", "zenbusiness.com", "nolo.com",
+    "swyftfilings.com", "rocketlawyer.com", "northwest.com",
+    "bizfilings.com", "corpnet.com", "mycorporation.com",
+    "harborcompliance.com", "incorporations.com",
+    "score.org", "sba.gov", "irs.gov", "nolo.com",
+    "wikihow.com", "wikipedia.org", "investopedia.com",
+    "forbes.com", "entrepreneur.com", "thebalancemoney.com",
+    "indeed.com", "glassdoor.com", "yelp.com",
+}
 
 
 def collect(config: dict | None = None) -> list[dict]:
@@ -68,32 +96,47 @@ def collect(config: dict | None = None) -> list[dict]:
 
         time.sleep(2)  # Be conservative with DDG
 
-    print(f"  Web discovery: found {len(companies)} companies from {len(queries)} queries")
-    return companies
+    # Deduplicate by normalized name
+    seen = set()
+    unique = []
+    for c in companies:
+        key = c["company_name"].lower().strip()
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+
+    print(f"  Web discovery: found {len(unique)} companies from {len(queries)} queries")
+    return unique
 
 
 def _build_queries(state: str, year: int) -> list[tuple[str, str]]:
     """Build search queries for each signal type."""
     state_names = {
-        "WA": "Washington",
+        "WA": "Washington state",
         "CA": "California",
         "NY": "New York",
         "OR": "Oregon",
+        "TX": "Texas",
     }
     state_name = state_names.get(state, state)
 
     return [
-        (f'"new business" "LLC" site:sos.{state.lower()}.gov {year}', "new_business"),
-        (f'"new business formation" {state_name} {year}', "new_business"),
-        (f'"lawsuit" "employment" {state_name} company {year}', "active_lawsuit"),
-        (f'"sold" OR "acquired" OR "new management" small business {state_name} {year}', "business_change"),
+        # New business formations — target SOS filings
+        (f'new LLC formed {state_name} {year} site:sos.{state.lower()}.gov', "new_business"),
+        (f'new business registration {state_name} {year} LLC Corp', "new_business"),
+        # Lawsuits — target small business litigation
+        (f'small business lawsuit employment {state_name} {year}', "active_lawsuit"),
+        (f'company sued employee dispute {state_name} {year}', "active_lawsuit"),
+        # Business changes — acquisitions, sales, rebrands
+        (f'small business sold acquired new owner {state_name} {year}', "business_change"),
+        (f'business transfer sale rebrand {state_name} {year}', "business_change"),
     ]
 
 
 def _search_ddg(query: str) -> list[dict]:
     """Execute a DuckDuckGo HTML search and return results."""
     try:
-        r = requests.get(DDG_HTML, params={"q": query}, headers=HEADERS, timeout=15)
+        r = requests.post(DDG_HTML, data={"q": query, "b": ""}, headers=HEADERS, timeout=15)
         if r.status_code != 200:
             return []
 
@@ -107,15 +150,30 @@ def _search_ddg(query: str) -> list[dict]:
             if not title_el:
                 continue
 
+            url = title_el.get("href", "")
+
+            # Skip results from known form-filling / how-to sites
+            if _is_skip_domain(url):
+                continue
+
             results.append({
                 "title": title_el.get_text(strip=True),
-                "url": title_el.get("href", ""),
+                "url": url,
                 "snippet": snippet_el.get_text(strip=True) if snippet_el else "",
             })
 
         return results[:10]  # Cap at 10 per query
     except Exception:
         return []
+
+
+def _is_skip_domain(url: str) -> bool:
+    """Check if URL is from a domain we should skip."""
+    url_lower = url.lower()
+    for domain in SKIP_DOMAINS:
+        if domain in url_lower:
+            return True
+    return False
 
 
 def _extract_company(result: dict, signal_type: str, state: str) -> dict | None:
@@ -136,9 +194,9 @@ def _extract_company(result: dict, signal_type: str, state: str) -> dict | None:
     if signal_type == "business_change" and not CHANGE_TERMS.search(text):
         return None
 
-    # Extract the company name (text before or containing the legal suffix)
+    # Extract the company name
     company_name = _extract_company_name(text)
-    if not company_name or len(company_name) < 3:
+    if not company_name:
         return None
 
     return {
@@ -159,15 +217,43 @@ def _extract_company(result: dict, signal_type: str, state: str) -> dict | None:
 def _extract_company_name(text: str) -> str:
     """Extract the most likely company name from text."""
     # Look for patterns like "Company Name LLC" or "Company Name, Inc."
-    match = re.search(
-        r"([A-Z][A-Za-z\s&'\-\.]+(?:LLC|Inc\.?|Corp\.?|Corporation|Co\.?|Company|Ltd\.?|PLLC|LP|LLP))",
+    # Require at least 2 characters before the legal suffix
+    matches = re.findall(
+        r"([A-Z][A-Za-z0-9\s&'\-\.]{2,50}(?:LLC|Inc\.?|Corp\.?|Corporation|Co\.|Company|Ltd\.?|PLLC|LP|LLP))",
         text,
     )
-    if match:
-        name = match.group(1).strip()
-        # Trim leading common words
-        name = re.sub(r"^(?:The|A|An)\s+", "", name, flags=re.IGNORECASE)
-        if len(name) > 3:
-            return name
+
+    for raw_match in matches:
+        name = raw_match.strip()
+        # Trim leading common words that aren't part of company names
+        name = re.sub(
+            r"^(?:The|A|An|About|How|Why|What|When|To|For|Your|My|Our|Their|This|That|From|With|Form|File|Start|Create|Open|Register)\s+",
+            "",
+            name,
+            flags=re.IGNORECASE,
+        )
+        name = name.strip()
+
+        # Check minimum length (must be a real name, not just "LLC")
+        name_without_suffix = COMPANY_SUFFIX.sub("", name).strip()
+        if len(name_without_suffix) < 3:
+            continue
+
+        # Check against false positive blacklist
+        if name.lower().strip() in FALSE_POSITIVE_NAMES:
+            continue
+
+        # Must have at least one word that looks like a proper noun before suffix
+        name_core = COMPANY_SUFFIX.sub("", name).strip()
+        words = name_core.split()
+        if not words:
+            continue
+
+        # At least one word should start with uppercase (proper noun check)
+        has_proper_noun = any(w[0].isupper() for w in words if w)
+        if not has_proper_noun:
+            continue
+
+        return name
 
     return ""

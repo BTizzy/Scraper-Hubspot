@@ -1,20 +1,22 @@
 """opencorporates_source.py — Search OpenCorporates for recent incorporations.
 
 API: https://api.opencorporates.com/v0.4/companies/search
-Free tier: 200 searches/month, no key needed for basic search.
-Also detects previous_names on companies → tags as business_change.
+Requires API key (free tier discontinued for keyless access).
+Set OPENCORPORATES_API_KEY env var if you have a key.
+
+Falls back gracefully to 0 results if no key or API unavailable.
 
 Output: list of dicts in standard company format.
 """
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timedelta
 
 import requests
 
 OPENCORP_SEARCH = "https://api.opencorporates.com/v0.4/companies/search"
-OPENCORP_HTML = "https://opencorporates.com/companies"
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
 
@@ -35,22 +37,23 @@ def collect(config: dict | None = None) -> list[dict]:
     jurisdiction = config.get("jurisdiction", "us_wa")
     max_pages = int(config.get("max_pages", 5))
 
+    api_key = os.environ.get("OPENCORPORATES_API_KEY", "").strip()
+
     since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     companies = []
 
     try:
-        companies = _fetch_from_api(since_date, jurisdiction, max_pages)
+        companies = _fetch_from_api(since_date, jurisdiction, max_pages, api_key)
     except Exception as e:
-        print(f"  OpenCorporates API failed ({e}), trying HTML fallback...")
-        try:
-            companies = _fetch_from_html(since_date, jurisdiction, max_pages)
-        except Exception as e2:
-            print(f"  OpenCorporates HTML fallback also failed: {e2}")
+        print(f"  OpenCorporates API failed: {e}")
+        if not api_key:
+            print("  Tip: Set OPENCORPORATES_API_KEY env var for API access")
+        print("  OpenCorporates: returning 0 results (non-fatal)")
 
     return companies
 
 
-def _fetch_from_api(since_date: str, jurisdiction: str, max_pages: int) -> list[dict]:
+def _fetch_from_api(since_date: str, jurisdiction: str, max_pages: int, api_key: str) -> list[dict]:
     """Use the OpenCorporates REST API."""
     companies = []
 
@@ -62,12 +65,17 @@ def _fetch_from_api(since_date: str, jurisdiction: str, max_pages: int) -> list[
             "page": str(page),
             "per_page": "30",
         }
+        if api_key:
+            params["api_token"] = api_key
 
         r = requests.get(OPENCORP_SEARCH, params=params, headers=HEADERS, timeout=15)
 
         if r.status_code in (401, 403):
             if page == 1:
-                raise RuntimeError(f"OpenCorporates API returned HTTP {r.status_code}")
+                raise RuntimeError(
+                    f"OpenCorporates API returned HTTP {r.status_code} — "
+                    f"API key {'provided but invalid' if api_key else 'required (set OPENCORPORATES_API_KEY)'}"
+                )
             break
 
         if r.status_code == 429:
@@ -130,48 +138,3 @@ def _normalize_api_result(company_data: dict) -> dict | None:
         "source": "opencorporates",
         "signal_tag": signal_tag,
     }
-
-
-def _fetch_from_html(since_date: str, jurisdiction: str, max_pages: int) -> list[dict]:
-    """Fallback: scrape OpenCorporates HTML search results."""
-    from urllib.parse import quote_plus
-    from bs4 import BeautifulSoup
-
-    companies = []
-
-    for page in range(1, min(max_pages, 3) + 1):
-        url = (
-            f"{OPENCORP_HTML}?"
-            f"q=*&jurisdiction_code={jurisdiction}"
-            f"&incorporation_date%5Bstart%5D={since_date}"
-            f"&page={page}"
-        )
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
-            if r.status_code != 200:
-                break
-
-            soup = BeautifulSoup(r.text, "html.parser")
-            for link in soup.select("a[href*='/companies/us_']"):
-                name = link.get_text(strip=True)
-                if name and len(name) > 2:
-                    companies.append({
-                        "company_name": name,
-                        "registered_date": "",
-                        "ubi_number": "",
-                        "entity_type": "",
-                        "registered_agent": "",
-                        "governors": "[]",
-                        "status": "",
-                        "principal_office": "",
-                        "state": "WA",
-                        "source": "opencorporates",
-                        "signal_tag": "new_business",
-                    })
-        except Exception:
-            break
-
-        time.sleep(1)
-
-    print(f"  OpenCorporates HTML: fetched {len(companies)} companies")
-    return companies

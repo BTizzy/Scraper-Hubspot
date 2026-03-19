@@ -351,6 +351,8 @@ Examples:
                         help='Disable hard daily run contract checks')
     args = parser.parse_args()
 
+    py = sys.executable  # Use the same Python that runs this script
+
     # Run web collection if requested
     if args.collect_from_web:
         out_dir = os.path.abspath(args.output_dir)
@@ -393,8 +395,6 @@ Examples:
     contract_enabled = bool(contract.get('enabled', True)) and not args.disable_contract_gates
 
     input_profile = preflight_input_profile(sos)
-
-    py = sys.executable  # Use the same Python that runs this script
 
     # ── Build step list ────────────────────────────────────────────────────────
     steps = []
