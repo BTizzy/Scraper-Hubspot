@@ -28,6 +28,26 @@ KEYWORDS = [
 ]
 ALIAS_COLUMN_PATTERN = re.compile(r'(previous|former|old|alternate|trade|dba).*(name)?', re.IGNORECASE)
 LEGAL_SUFFIX_PATTERN = re.compile(r'\b(llc|inc|corp|corporation|co|company|ltd|limited|pllc|lp|llp|group|services|holdings)\b', re.IGNORECASE)
+RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
+
+
+def get_with_retry(url, *, headers=None, timeout=10, retries=2, backoff_seconds=0.8):
+    """Perform GET with exponential backoff for transient failures."""
+    last_error = ''
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.get(url, timeout=timeout, headers=headers)
+            if resp.status_code in RETRYABLE_HTTP_CODES and attempt < retries:
+                time.sleep(backoff_seconds * (2 ** attempt))
+                continue
+            return resp, ''
+        except requests.exceptions.RequestException as exc:
+            last_error = str(exc)
+            if attempt < retries:
+                time.sleep(backoff_seconds * (2 ** attempt))
+                continue
+            return None, last_error
+    return None, last_error
 
 
 def _normalize_name(value):
@@ -58,13 +78,23 @@ def extract_row_aliases(row, company_name):
 def fetch_url_with_http_fallback(url, timeout=8):
     """Try the given URL and fall back to http:// on TLS/SSL failures."""
     try:
-        response = requests.get(url, timeout=timeout, headers=HEADERS)
+        response, req_error = get_with_retry(url, timeout=timeout, headers=HEADERS, retries=2, backoff_seconds=0.8)
+        if response is None:
+            raise requests.exceptions.RequestException(req_error or 'request failed after retries')
         return response, url, ''
     except requests.exceptions.SSLError as exc:
         if url.startswith('https://'):
             fallback_url = 'http://' + url[len('https://'):]
             try:
-                response = requests.get(fallback_url, timeout=timeout, headers=HEADERS)
+                response, req_error = get_with_retry(
+                    fallback_url,
+                    timeout=timeout,
+                    headers=HEADERS,
+                    retries=2,
+                    backoff_seconds=0.8,
+                )
+                if response is None:
+                    raise requests.exceptions.RequestException(req_error or 'fallback request failed after retries')
                 return response, fallback_url, f'https failed: {exc}'
             except requests.exceptions.RequestException as fallback_exc:
                 raise requests.exceptions.RequestException(f'https={exc}; http={fallback_exc}') from fallback_exc
@@ -75,7 +105,14 @@ def search_opencorp(name):
     try:
         q = requests.utils.requote_uri(name)
         url = OPENCORP_SEARCH.format(q=q)
-        r = requests.get(url, timeout=10)
+        r, req_error = get_with_retry(url, timeout=10, retries=2, backoff_seconds=1.0)
+        if r is None:
+            return {
+                'company': None,
+                'status': 'request_error',
+                'http_status': '',
+                'error': req_error or 'request failed after retries',
+            }
         http_status = r.status_code
         if http_status in (401, 403):
             return {
@@ -148,7 +185,14 @@ def scrape_opencorp_html(name):
     """Fallback: scrape OpenCorporates HTML search when API returns 401."""
     try:
         search_url = f"https://opencorporates.com/companies?q={quote_plus(name)}&jurisdiction_code=us_wa"
-        r = requests.get(search_url, timeout=12, headers=HEADERS)
+        r, req_error = get_with_retry(search_url, timeout=12, headers=HEADERS, retries=2, backoff_seconds=1.0)
+        if r is None:
+            return {
+                'company': None,
+                'status': 'html_request_error',
+                'http_status': '',
+                'error': req_error or 'HTML request failed after retries',
+            }
         if r.status_code != 200:
             return {
                 'company': None,
@@ -184,8 +228,8 @@ def scrape_opencorp_html(name):
 
         # Fetch company detail page to look for previous names
         try:
-            dr = requests.get(company_url, timeout=12, headers=HEADERS)
-            if dr.status_code == 200:
+            dr, _ = get_with_retry(company_url, timeout=12, headers=HEADERS, retries=2, backoff_seconds=0.8)
+            if dr is not None and dr.status_code == 200:
                 detail_soup = BeautifulSoup(dr.text, 'html.parser')
                 # Look for "Previous Names" or "Alternative Names" section
                 for heading in detail_soup.find_all(['dt', 'h3', 'h4', 'th']):
@@ -401,14 +445,28 @@ def find(input_csv, output_csv):
 
             # Primary source: row-native alias/history columns from SOS or upstream registries.
             row_aliases = extract_row_aliases(row, name)
-            query_status = 'row_history_found' if row_aliases else 'no_row_history'
             query_http_status = ''
             query_error = ''
-            query_status_counts[query_status] = query_status_counts.get(query_status, 0) + 1
             if row_aliases:
+                query_status = 'row_history_found'
                 rebrand_flag = 'TRUE'
                 reason = 'row name-history fields'
                 sample = '; '.join([str(x) for x in row_aliases[:3]])
+            else:
+                # No history in row — query OpenCorporates for prior names
+                oc_result = search_opencorp_with_fallback(name)
+                query_http_status = oc_result.get('http_status', '')
+                query_error = oc_result.get('error', '')
+                oc_company = oc_result.get('company')
+                if oc_company and oc_company.get('previous_names'):
+                    row_aliases = oc_company['previous_names']
+                    query_status = 'oc_history_found'
+                    rebrand_flag = 'TRUE'
+                    reason = 'OpenCorporates previous name'
+                    sample = '; '.join(row_aliases[:3])
+                else:
+                    query_status = oc_result['status']
+            query_status_counts[query_status] = query_status_counts.get(query_status, 0) + 1
 
             # Scan homepage for textual signals
             website = row.get('website') or row.get('domain') or ''

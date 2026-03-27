@@ -339,13 +339,11 @@ def verify(input_csv, output_csv, smtp=False):
             row['catch_all'] = catch_all
             row['smtp_status'] = smtp_status
             row['smtp_attempted'] = 'TRUE' if smtp_attempted else 'FALSE'
-            if score.startswith('PASS') or score.startswith('UNVERIFIED'):
-                # Both PASS and UNVERIFIED mean MX passed; UNVERIFIED just means
-                # SMTP couldn't confirm the specific mailbox.
-                row['mx_pass'] = 'TRUE'
-                row['reject_reason'] = '' if score.startswith('PASS') else score
+            # Preserve the domain-level MX check independently of mailbox verdict.
+            row['mx_pass'] = 'TRUE' if bool(mx) else 'FALSE'
+            if score.startswith('PASS'):
+                row['reject_reason'] = ''
             else:
-                row['mx_pass'] = 'FALSE'
                 row['reject_reason'] = score
             writer.writerow(row)
 

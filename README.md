@@ -108,33 +108,32 @@ The pipeline is stateful by file stage. Each step produces a CSV consumed by the
 - Produced by: `build_csv.py`
 - Contains records filtered by quality gates plus `reject_reason`
 
-## Last Run Snapshot (Executed 2026-03-07)
+## Last Run Snapshot (Executed 2026-03-27)
 
-No prior output artifacts were present in the repository, so a fresh test run was executed.
+Recent verification runs were executed in both hosted discovery and strict verify paths.
 
-Command used:
+Hosted discovery command used:
 
 ```bash
 cd scripts
 /home/codespace/.python/current/bin/python run_pipeline.py \
-	--sos test_data/sos_sample.csv \
-	--skip-theharvester --skip-dorks \
-	--min-level C \
-	--output-dir output_test_run
+	--sos test_data/sos_realistic.csv \
+	--mode hosted_discovery --soft-report \
+	--output-dir output_hosted_smoke
 ```
 
-Observed step status:
+Observed hosted-mode status:
 
 - Step 1 `Company Enrichment`: `OK`
 - Step 2 `Headcount Estimation`: `OK`
 - Step 3 `Lawsuit Detection`: `OK` (CourtListener returned HTTP 403 for all lookups)
 - Step 4 `Rebrand Detection`: `OK`
-- Step 5 `Waterfall Contact Enrichment`: `OK`
-- Step 6 `Email Verification`: `OK`
-- Step 7 `Freshness Scoring`: `OK`
-- Step 8 `HubSpot CSV Builder`: `OK`
+- Step 7 `Waterfall Contact Enrichment`: `OK`
+- Step 8 `Email Verification`: `OK`
+- Step 9 `Freshness Scoring`: `OK`
+- HubSpot export: intentionally skipped in hosted mode
 
-Run totals:
+Hosted run totals:
 
 - Companies enriched: `5`
 - Companies sized: `5`
@@ -142,11 +141,23 @@ Run totals:
 - Rebrand rows: `5`
 - Contacts raw: `0`
 - Contacts verified: `0`
-- Contacts scored: `0` (file not created when no records)
-- Contacts qualified: `0`
-- HubSpot import rows: `0`
+- Contacts scored: `30` (all `C` in this sample)
+- Contacts qualified: `0` at min-level `B`
+- Top-of-funnel alert pattern: officer permutation dominance
 
-Artifacts from that run are under `scripts/output_test_run/`.
+Artifacts from that run are under `scripts/output_hosted_smoke/`.
+
+Strict verify command used:
+
+```bash
+cd scripts
+/home/codespace/.python/current/bin/python run_pipeline.py \
+	--sos test_data/sos_realistic.csv \
+	--mode strict_verify --smtp \
+	--output-dir output_day1_impl
+```
+
+This path currently exits non-zero when contract gates are not met, as intended.
 
 ## Validation Run
 
@@ -158,3 +169,5 @@ cd scripts
 ```
 
 Result: `43 passed, 0 failed`.
+
+Current suite status after mode and diagnostics updates: `83 passed, 0 failed`.

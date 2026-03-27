@@ -140,6 +140,23 @@ DAILY_RUN_CONTRACT = {
     "min_unique_companies_per_signal": 1,
 }
 
+# ── Execution Modes ───────────────────────────────────────────────────────────
+# hosted_discovery: optimized for GitHub-hosted runners where SMTP probing is
+# often transport-blocked. Produces provisional diagnostics and artifacts.
+# strict_verify: requires mailbox-level SMTP acceptance for strict eligibility.
+EXECUTION_MODES = {
+    "hosted_discovery": {
+        "use_smtp": False,
+        "contract_hard_fail": False,
+        "build_hubspot_export": False,
+    },
+    "strict_verify": {
+        "use_smtp": True,
+        "contract_hard_fail": True,
+        "build_hubspot_export": True,
+    },
+}
+
 
 def get_daily_run_contract() -> dict:
     """Return a defensive copy of the daily run gate contract."""
@@ -148,6 +165,13 @@ def get_daily_run_contract() -> dict:
         "count_confidence_levels": list(DAILY_RUN_CONTRACT.get("count_confidence_levels", [])),
         "required_signals": list(DAILY_RUN_CONTRACT.get("required_signals", [])),
     }
+
+
+def get_execution_mode_config(mode: str) -> dict:
+    """Return mode config, defaulting to strict_verify for unknown values."""
+    key = (mode or "strict_verify").strip().lower()
+    selected = EXECUTION_MODES.get(key, EXECUTION_MODES["strict_verify"])
+    return dict(selected)
 
 def get_signal_priority(tag: str) -> int:
     """Return priority weight for a signal tag, or 0 if unknown."""

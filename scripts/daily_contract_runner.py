@@ -128,6 +128,16 @@ def is_real_active_email(row: dict) -> bool:
     return confidence in ("A", "B") and smtp_ok in ("ACCEPT", "TRUE") and catch_all == "FALSE" and mx_pass == "TRUE"
 
 
+def is_provisional_active_email(row: dict) -> bool:
+    """Hosted discovery proxy eligibility when SMTP certainty is unavailable."""
+    smtp_ok = (row.get("smtp_ok") or "").strip().upper()
+    smtp_status = (row.get("smtp_status") or "").strip().lower()
+    mx_pass = (row.get("mx_pass") or "").strip().upper()
+    if smtp_ok in ("REJECT", "FALSE"):
+        return False
+    return mx_pass == "TRUE" and smtp_status in ("transport_blocked", "mx_lookup_failed", "not_attempted", "")
+
+
 def evaluate_contract(rows: list[dict], contract: dict) -> dict:
     required_signals = list(contract.get("required_signals", []))
     min_signal_companies = int(contract.get("min_unique_companies_per_signal", 0))
@@ -210,13 +220,16 @@ def main() -> int:
     parser.add_argument("--max-batches", type=int, default=20, help="Maximum batch runs in one day")
     parser.add_argument("--target-active-emails", type=int, default=0, help="Override min real active emails target")
     parser.add_argument("--smtp", action="store_true", help="Enable SMTP probe (required for real active emails)")
+    parser.add_argument("--mode", choices=["strict_verify", "hosted_discovery"], default="strict_verify",
+                        help="strict_verify requires SMTP acceptance; hosted_discovery reports provisional metrics")
     parser.add_argument("--hunter-key", default="", help="Hunter API key")
     parser.add_argument("--skip-theharvester", action="store_true")
     parser.add_argument("--skip-dorks", action="store_true")
+    parser.add_argument("--soft-report", action="store_true", help="Always exit 0 even when contract is not met")
     parser.add_argument("--update-state-on-failure", action="store_true", help="Persist seen state even if contract fails")
     args = parser.parse_args()
 
-    if not args.smtp:
+    if args.mode == "strict_verify" and not args.smtp:
         print("ERROR: --smtp is required for real active email mode.")
         return 2
 
@@ -278,9 +291,11 @@ def main() -> int:
                 "--sos", str(batch_input),
                 "--output-dir", str(batch_dir),
                 "--min-level", "B",
-                "--smtp",
                 "--disable-contract-gates",
+                "--mode", args.mode,
             ]
+            if args.smtp:
+                cmd.append("--smtp")
             if args.hunter_key:
                 cmd.extend(["--hunter-key", args.hunter_key])
             if args.skip_theharvester:
@@ -304,12 +319,15 @@ def main() -> int:
         # Evaluate rolling progress on real active contacts not seen before.
         dedup_scored = unique_by_email(all_scored)
         active = [r for r in dedup_scored if is_real_active_email(r)]
+        provisional = [r for r in dedup_scored if is_provisional_active_email(r)]
         active_novel = [r for r in active if (r.get("email") or "").strip().lower() not in seen_emails]
         contract_eval = evaluate_contract(active_novel, contract)
+        contract_eval["provisional_contacts"] = len(provisional)
 
         print(
             "Progress: "
             f"active={contract_eval['eligible_contacts']} "
+            f"provisional={contract_eval['provisional_contacts']} "
             f"companies={contract_eval['unique_companies']} "
             f"signals={contract_eval['signal_company_counts']}"
         )
@@ -320,8 +338,10 @@ def main() -> int:
 
     dedup_scored = unique_by_email(all_scored)
     active = [r for r in dedup_scored if is_real_active_email(r)]
+    provisional = [r for r in dedup_scored if is_provisional_active_email(r)]
     active_novel = [r for r in active if (r.get("email") or "").strip().lower() not in seen_emails]
     contract_eval = evaluate_contract(active_novel, contract)
+    contract_eval["provisional_contacts"] = len(provisional)
 
     # Persist consolidated outputs
     if dedup_scored:
@@ -355,6 +375,7 @@ def main() -> int:
         "candidate_companies": len(candidate_rows),
         "used_companies": len(used_company_keys),
         "real_active_contacts": len(active_novel),
+        "provisional_contacts": len(provisional),
         "contract": contract,
         "evaluation": contract_eval,
     }
@@ -372,6 +393,7 @@ def main() -> int:
     print("\nDaily contract runner complete:")
     print(f"  output_dir={out_dir}")
     print(f"  real_active_contacts={len(active_novel)}")
+    print(f"  provisional_contacts={len(provisional)}")
     print(f"  contract_passed={contract_eval['passed']}")
     if contract_eval["deficits"]:
         print("  deficits:")
@@ -379,6 +401,8 @@ def main() -> int:
             print(f"    - {d}")
     print(f"  state_updated={should_update_state}")
 
+    if args.soft_report:
+        return 0
     return 0 if contract_eval["passed"] else 1
 
 

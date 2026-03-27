@@ -91,7 +91,42 @@ python run_pipeline.py --sos sos_export.csv --skip-theharvester --skip-dorks --m
 
 # Dry run (see plan without executing):
 python run_pipeline.py --sos sos_export.csv --dry-run
+
+# Hosted discovery mode (GitHub-hosted runner, soft-report):
+python run_pipeline.py --sos test_data/sos_30companies.csv --mode hosted_discovery --soft-report --min-level B
+
+# Strict verify mode (self-hosted runner with SMTP egress):
+python run_pipeline.py --sos test_data/sos_30companies.csv --mode strict_verify --smtp --min-level B
 ```
+
+### Execution Modes
+
+- `hosted_discovery`: no SMTP requirement, soft-report friendly, intended for GitHub-hosted runs.
+- `strict_verify`: mailbox-validity enforcement with SMTP acceptance, intended for self-hosted runs.
+
+`build_csv.py` quality gates are mode-aware:
+- strict mode blocks officer-permutation rows without SMTP acceptance.
+- hosted mode allows provisional transport-blocked rows for diagnostics only.
+
+### Top-Of-Funnel Alerts
+
+`run_pipeline.py` emits `top_of_funnel_alerts` in console and KPI JSON when discovery quality collapses:
+
+- `no_contacts_discovered`
+- `source_diversity_low_single_source`
+- `source_dominance_high:<source>:<share>`
+- `officer_permutation_only`
+
+Use these alerts to catch upstream acquisition regressions before strict export evaluation.
+
+### GitHub Workflow Defaults
+
+Workflow file: `.github/workflows/lead-pipeline.yml`
+
+- Default SOS input: `test_data/sos_30companies.csv` (relative to `scripts/`).
+- Hosted job runs first and uploads discovery artifacts.
+- Self-hosted job runs strict verification and uploads strict artifacts.
+- Schedule/manual runs both fall back safely to the default SOS path when inputs are empty.
 
 ### Daily Novel-List Runner
 

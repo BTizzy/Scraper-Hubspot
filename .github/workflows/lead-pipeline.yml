@@ -1,0 +1,106 @@
+name: Lead Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      sos_path:
+        description: "Path to SOS CSV relative to scripts/"
+        required: false
+        default: "test_data/sos_30companies.csv"
+      run_strict_verify:
+        description: "Run strict verify job on self-hosted runner"
+        required: false
+        default: "true"
+      min_level:
+        description: "Minimum confidence level"
+        required: false
+        default: "B"
+  schedule:
+    - cron: "0 8 * * *"
+
+jobs:
+  discover_hosted:
+    name: Hosted Discovery (Provisional)
+    runs-on: ubuntu-latest
+    env:
+      SOS_PATH: ${{ github.event.inputs.sos_path }}
+      MIN_LEVEL: ${{ github.event.inputs.min_level }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements.txt
+
+      - name: Run hosted discovery mode
+        run: |
+          cd scripts
+          SOS_PATH_EFFECTIVE="${SOS_PATH:-test_data/sos_30companies.csv}"
+          MIN_LEVEL_EFFECTIVE="${MIN_LEVEL:-B}"
+          python run_pipeline.py \
+            --sos "$SOS_PATH_EFFECTIVE" \
+            --mode hosted_discovery \
+            --soft-report \
+            --min-level "$MIN_LEVEL_EFFECTIVE" \
+            --output-dir output_hosted_discovery
+
+      - name: Upload hosted artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-discovery-output
+          path: scripts/output_hosted_discovery/
+          if-no-files-found: warn
+
+  verify_self_hosted:
+    name: Strict Verify (Self-Hosted)
+    needs: discover_hosted
+    if: ${{ github.event_name == 'schedule' || github.event.inputs.run_strict_verify != 'false' }}
+    runs-on: self-hosted
+    env:
+      SOS_PATH: ${{ github.event.inputs.sos_path }}
+      MIN_LEVEL: ${{ github.event.inputs.min_level }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements.txt
+
+      - name: Download hosted artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: hosted-discovery-output
+          path: scripts/output_hosted_discovery
+
+      - name: Run strict verify mode
+        run: |
+          cd scripts
+          SOS_PATH_EFFECTIVE="${SOS_PATH:-test_data/sos_30companies.csv}"
+          MIN_LEVEL_EFFECTIVE="${MIN_LEVEL:-B}"
+          python run_pipeline.py \
+            --sos "$SOS_PATH_EFFECTIVE" \
+            --mode strict_verify \
+            --smtp \
+            --min-level "$MIN_LEVEL_EFFECTIVE" \
+            --output-dir output_strict_verify
+
+      - name: Upload strict artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: strict-verify-output
+          path: scripts/output_strict_verify/
+          if-no-files-found: warn

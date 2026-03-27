@@ -66,7 +66,7 @@ def person_company_key(first_name, last_name, company):
     return f"{first}|{last}|{comp}"
 
 
-def passes_quality(row):
+def passes_quality(row, mode='strict_verify'):
     email = (row.get('email') or row.get('Email') or '').strip()
     company = (row.get('company') or row.get('Company') or '').strip()
     mx = (row.get('mx_pass') or '').upper()
@@ -74,6 +74,8 @@ def passes_quality(row):
     confidence = (row.get('confidence_level') or '').upper()
     source = (row.get('source') or '').lower().strip()
     smtp_ok = (row.get('smtp_ok') or '').upper()
+    smtp_status = (row.get('smtp_status') or '').lower().strip()
+    catch_all = (row.get('catch_all') or '').upper()
     smtp_accept = smtp_ok in ('ACCEPT', 'TRUE')
 
     if not email:
@@ -87,12 +89,23 @@ def passes_quality(row):
         return False, 'MX check failed'
     # Accept A, B, and C confidence tiers for HubSpot import.
     # Ryan can filter by Confidence Level column in HubSpot.
-    if confidence not in ('A', 'B', 'C'):
+    if confidence not in ('A', 'B'):
         return False, f'Low confidence ({confidence or "unknown"})'
+    # Officer permutation emails are guessed patterns.
+    # strict_verify mode requires SMTP acceptance on non-catch-all domains.
+    # hosted_discovery mode allows transport-level unknowns as provisional output.
+    if source == 'officer_permutation':
+        if smtp_accept and catch_all != 'TRUE':
+            return True, ''
+        if smtp_ok == 'REJECT':
+            return False, 'Officer permutation mailbox rejected'
+        if mode == 'hosted_discovery' and smtp_status in ('transport_blocked', 'mx_lookup_failed') and confidence in ('A', 'B'):
+            return True, ''
+        return False, 'Officer permutation without SMTP acceptance'
     return True, ''
 
 
-def build(input_csv, output_csv, reject_csv):
+def build(input_csv, output_csv, reject_csv, mode='strict_verify'):
     try:
         with open(input_csv, newline='', encoding='utf-8') as fin:
             reader = csv.DictReader(fin)
@@ -118,13 +131,14 @@ def build(input_csv, output_csv, reject_csv):
     with open(output_csv, 'w', newline='', encoding='utf-8') as fout, \
          open(reject_csv, 'w', newline='', encoding='utf-8') as frej:
         writer = csv.DictWriter(fout, fieldnames=HUBSPOT_HEADERS)
-        rej_fields = list(input_fields) + ['reject_reason']
+        # Ensure reject_reason column appears exactly once, at the end
+        rej_fields = [f for f in input_fields if f != 'reject_reason'] + ['reject_reason']
         rej_writer = csv.DictWriter(frej, fieldnames=rej_fields, extrasaction='ignore')
         writer.writeheader()
         rej_writer.writeheader()
 
         for row in rows:
-            ok, reason = passes_quality(row)
+            ok, reason = passes_quality(row, mode=mode)
             if not ok:
                 row['reject_reason'] = reason
                 rej_writer.writerow(row)
@@ -190,8 +204,10 @@ def main():
     parser.add_argument('--input', '-i', required=True)
     parser.add_argument('--output', '-o', required=True)
     parser.add_argument('--rejects', '-r', default='rejects.csv')
+    parser.add_argument('--mode', choices=['strict_verify', 'hosted_discovery'], default='strict_verify',
+                        help='strict_verify enforces mailbox validity; hosted_discovery allows provisional transport-blocked rows')
     args = parser.parse_args()
-    build(args.input, args.output, args.rejects)
+    build(args.input, args.output, args.rejects, mode=args.mode)
 
 if __name__ == '__main__':
     main()

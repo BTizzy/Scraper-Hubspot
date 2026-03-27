@@ -37,7 +37,7 @@ import time
 from datetime import datetime
 
 from local_secrets import load_local_env
-from trillium_config import get_daily_run_contract
+from trillium_config import get_daily_run_contract, get_execution_mode_config
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -258,6 +258,36 @@ def summarize_funnel(raw_rows, verified_rows, scored_rows, reject_rows):
     return funnel
 
 
+def compute_top_of_funnel_alerts(funnel):
+    """Generate explicit alerts for source collapse and low top-of-funnel diversity."""
+    alerts = []
+    raw_total = int(funnel.get('counts', {}).get('raw', 0) or 0)
+    source_mix_raw = funnel.get('source_mix_raw', {}) or {}
+
+    if raw_total == 0:
+        alerts.append('no_contacts_discovered')
+        return alerts
+
+    non_empty_sources = {k: v for k, v in source_mix_raw.items() if k and k != '(empty)' and int(v or 0) > 0}
+    source_count = len(non_empty_sources)
+    if source_count <= 1:
+        alerts.append('source_diversity_low_single_source')
+
+    top_source = ''
+    top_count = 0
+    if non_empty_sources:
+        top_source, top_count = max(non_empty_sources.items(), key=lambda kv: kv[1])
+        dominance = top_count / raw_total if raw_total > 0 else 0
+        if dominance >= 0.90:
+            alerts.append(f'source_dominance_high:{top_source}:{dominance:.2f}')
+
+    officer_count = int(non_empty_sources.get('officer_permutation', 0) or 0)
+    if officer_count == raw_total and raw_total > 0:
+        alerts.append('officer_permutation_only')
+
+    return alerts
+
+
 def evaluate_run_contract(scored_rows, contract):
     """Evaluate hard run gates using scored contacts."""
     allowed_levels = set(contract.get('count_confidence_levels', ['A', 'B']))
@@ -266,12 +296,30 @@ def evaluate_run_contract(scored_rows, contract):
     min_contacts = int(contract.get('min_contacts_per_run', 0))
     min_companies = int(contract.get('min_unique_companies_per_run', 0))
 
-    eligible = [r for r in scored_rows if (r.get('confidence_level', '') or '').strip() in allowed_levels]
-    eligible_contacts = len(eligible)
-    unique_companies = { (r.get('company', '') or '').strip().lower() for r in eligible if (r.get('company', '') or '').strip() }
+    def _is_strict_eligible(row):
+        level_ok = (row.get('confidence_level', '') or '').strip() in allowed_levels
+        if not level_ok:
+            return False
+        smtp_ok = (row.get('smtp_ok', '') or '').strip().upper()
+        catch_all = (row.get('catch_all', '') or '').strip().upper()
+        mx_pass = (row.get('mx_pass', '') or '').strip().upper()
+        return smtp_ok in ('ACCEPT', 'TRUE') and catch_all == 'FALSE' and mx_pass == 'TRUE'
+
+    def _is_provisional_eligible(row):
+        smtp_ok = (row.get('smtp_ok', '') or '').strip().upper()
+        smtp_status = (row.get('smtp_status', '') or '').strip().lower()
+        mx_pass = (row.get('mx_pass', '') or '').strip().upper()
+        if smtp_ok in ('ACCEPT', 'TRUE'):
+            return True
+        return mx_pass == 'TRUE' and smtp_status in ('transport_blocked', 'mx_lookup_failed', 'not_attempted')
+
+    strict_eligible = [r for r in scored_rows if _is_strict_eligible(r)]
+    provisional_eligible = [r for r in scored_rows if _is_provisional_eligible(r)]
+    eligible_contacts = len(strict_eligible)
+    unique_companies = { (r.get('company', '') or '').strip().lower() for r in strict_eligible if (r.get('company', '') or '').strip() }
 
     signal_company_map = {s: set() for s in required_signals}
-    for row in eligible:
+    for row in strict_eligible:
         company = (row.get('company', '') or '').strip()
         if not company:
             continue
@@ -297,6 +345,8 @@ def evaluate_run_contract(scored_rows, contract):
     return {
         'passed': passed,
         'eligible_contacts': eligible_contacts,
+        'strict_eligible_contacts': eligible_contacts,
+        'provisional_contacts': len(provisional_eligible),
         'unique_companies': len(unique_companies),
         'allowed_levels': sorted(allowed_levels),
         'signal_company_counts': signal_counts,
@@ -349,6 +399,10 @@ Examples:
     parser.add_argument('--dry-run', action='store_true', help='Print plan only')
     parser.add_argument('--disable-contract-gates', action='store_true',
                         help='Disable hard daily run contract checks')
+    parser.add_argument('--mode', choices=['strict_verify', 'hosted_discovery'], default='strict_verify',
+                        help='strict_verify enforces strict mailbox validity; hosted_discovery is provisional/soft-report')
+    parser.add_argument('--soft-report', action='store_true',
+                        help='Never return non-zero due to contract deficits (still reports metrics)')
     args = parser.parse_args()
 
     py = sys.executable  # Use the same Python that runs this script
@@ -374,6 +428,9 @@ Examples:
     elif not args.sos:
         parser.error('--sos is required unless --collect-from-web is used')
 
+    mode_cfg = get_execution_mode_config(args.mode)
+    smtp_enabled = bool(args.smtp or mode_cfg.get('use_smtp', False))
+
     # Resolve paths
     sos = os.path.abspath(args.sos)
     out_dir = os.path.abspath(args.output_dir)
@@ -393,6 +450,7 @@ Examples:
 
     contract = get_daily_run_contract()
     contract_enabled = bool(contract.get('enabled', True)) and not args.disable_contract_gates
+    contract_hard_fail = bool(mode_cfg.get('contract_hard_fail', True)) and not args.soft_report
 
     input_profile = preflight_input_profile(sos)
 
@@ -443,11 +501,11 @@ Examples:
         py, os.path.join(SCRIPTS_DIR, 'verify_emails.py'),
         '--input', contacts_raw, '--output', contacts_verified
     ]
-    if args.smtp:
+    if smtp_enabled:
         verify_cmd.append('--smtp')
     steps.append(PipelineStep(6, 'Email Verification',
         verify_cmd,
-        'MX + domain age' + (' + SMTP RCPT + catch-all' if args.smtp else '')))
+        'MX + domain age' + (' + SMTP RCPT + catch-all' if smtp_enabled else '')))
 
     # Step 7: Freshness scoring
     steps.append(PipelineStep(7, 'Freshness Scoring',
@@ -456,13 +514,15 @@ Examples:
          '--min-level', args.min_level],
         f'Score by source quality + verification + recency → filter ≥{args.min_level}'))
 
-    # Step 8: HubSpot CSV builder
-    steps.append(PipelineStep(8, 'HubSpot CSV Builder',
-        [py, os.path.join(SCRIPTS_DIR, 'build_csv.py'),
-         '--input', contacts_scored.replace('.csv', '_qualified.csv'),
-         '--output', hubspot,
-         '--rejects', rejects],
-        'Quality gates + exact HubSpot header format'))
+    # Step 8: HubSpot CSV builder (strict mode only)
+    if mode_cfg.get('build_hubspot_export', True):
+        steps.append(PipelineStep(8, 'HubSpot CSV Builder',
+            [py, os.path.join(SCRIPTS_DIR, 'build_csv.py'),
+             '--input', contacts_scored.replace('.csv', '_qualified.csv'),
+             '--output', hubspot,
+             '--rejects', rejects,
+             '--mode', args.mode],
+            'Quality gates + exact HubSpot header format'))
 
     total = len(steps)
 
@@ -475,10 +535,11 @@ Examples:
 
   Input:   {sos}
   Output:  {out_dir}/
-  Verify:  MX{' + SMTP' if args.smtp else ''}{' + Hunter.io' if args.hunter_key else ''}
+    Mode:    {args.mode}
+    Verify:  MX{' + SMTP' if smtp_enabled else ''}{' + Hunter.io' if args.hunter_key else ''}
   Filter:  confidence ≥ {args.min_level}
   Steps:   {total}
-  Contract gates:  {'ENABLED' if contract_enabled else 'DISABLED'}
+    Contract gates:  {'ENABLED' if contract_enabled else 'DISABLED'} ({'HARD' if contract_hard_fail else 'SOFT'})
 """)
 
     print("  📥 Input profile:")
@@ -621,6 +682,7 @@ Examples:
     scored_rows = load_csv_rows(contacts_scored)
     reject_rows = load_csv_rows(rejects)
     funnel = summarize_funnel(raw_rows, verified_rows, scored_rows, reject_rows)
+    tof_alerts = compute_top_of_funnel_alerts(funnel)
 
     print("\n  🧪 Funnel diagnostics:")
     print(
@@ -643,6 +705,8 @@ Examples:
     )
     print(f"    smtp_statuses={funnel['smtp']['attempt_status']}")
     print(f"    top_reject_reasons={funnel['reject_reasons']}")
+    if tof_alerts:
+        print(f"    top_of_funnel_alerts={tof_alerts}")
 
     # Hard run contract evaluation
     contract_failed = False
@@ -658,9 +722,14 @@ Examples:
             f"eligible_contacts({contract_eval.get('allowed_levels', [])})={contract_eval.get('eligible_contacts', 0)} "
             f"unique_companies={contract_eval.get('unique_companies', 0)}"
         )
+        print(
+            "    "
+            f"strict_eligible={contract_eval.get('strict_eligible_contacts', 0)} "
+            f"provisional_contacts={contract_eval.get('provisional_contacts', 0)}"
+        )
         print(f"    signal_unique_companies={contract_eval.get('signal_company_counts', {})}")
         if contract_failed:
-            print("    ❌ CONTRACT FAILED")
+            print("    ❌ CONTRACT FAILED" if contract_hard_fail else "    ⚠ CONTRACT DEFICITS (SOFT REPORT)")
             for d in contract_eval.get('deficits', []):
                 print(f"      - {d}")
         else:
@@ -681,6 +750,7 @@ Examples:
                 'evaluation': contract_eval,
                 'pipeline_failed': failed,
                 'funnel': funnel,
+                'top_of_funnel_alerts': tof_alerts,
             },
         )
         print(f"    report={contract_report}")
@@ -702,15 +772,21 @@ Examples:
             },
             'funnel': funnel,
             'contract_evaluation': contract_eval,
+            'top_of_funnel_alerts': tof_alerts,
         },
     )
     print(f"  📄 Daily KPI report: {daily_kpi_report}")
 
-    if not failed and not contract_failed:
+    effective_contract_failure = contract_failed and contract_hard_fail
+
+    if not failed and not effective_contract_failure and mode_cfg.get('build_hubspot_export', True):
         print(f"\n  🎯 Ready: {hubspot}")
         print(f"     Import into HubSpot → Contacts → Import → choose file\n")
+    elif not failed and not mode_cfg.get('build_hubspot_export', True):
+        print("\n  ℹ Hosted discovery mode complete: strict HubSpot export intentionally skipped.")
+        print("     Use strict_verify mode on a self-hosted runner to publish final import file.\n")
 
-    if failed or contract_failed:
+    if failed or effective_contract_failure:
         return 1
     return 0
 

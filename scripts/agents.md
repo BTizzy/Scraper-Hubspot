@@ -154,3 +154,36 @@ Before you go about answering any prompt
 			- command: `python run_pipeline.py --sos test_data/sos_realistic.csv --skip-theharvester --skip-dorks --smtp --min-level B --disable-contract-gates --output-dir output_smtp_fix_check`
 			- `daily_kpi_report.json` shows SMTP states now cleanly classified as `mx_lookup_failed` (not generic `probe_exception`).
 			- Confidence remained all `C` due zero SMTP accepts; current blocker is SMTP methodology/network reality, not tuple-shape bug.
+
+	## 2026-03-27 GitHub Launch Hardening (completed)
+
+	- Completed requested implementation items 1-3:
+		1. Retry/backoff hardening for top-of-funnel signal collectors.
+		2. GitHub workflow default input upgraded from 5-company sample to 30-company sample.
+		3. Added explicit top-of-funnel source-collapse alerts in pipeline diagnostics.
+
+	- File updates:
+		- `find_lawsuits.py`
+			- Added `get_with_retry()` with exponential backoff.
+			- CourtListener and DDG queries now retry transient errors (`429`, `5xx`, network exceptions).
+		- `find_rebrands.py`
+			- Added `get_with_retry()` and applied to OpenCorporates API, HTML fallback, and website scans.
+			- HTTPS→HTTP fallback now also uses retry path.
+		- `run_pipeline.py`
+			- Added `compute_top_of_funnel_alerts()`.
+			- Emits alerts in console and writes `top_of_funnel_alerts` into `run_contract_report.json` and `daily_kpi_report.json`.
+			- Alert keys include: `no_contacts_discovered`, `source_diversity_low_single_source`, `source_dominance_high:*`, `officer_permutation_only`.
+		- `.github/workflows/lead-pipeline.yml`
+			- Default `sos_path` now `test_data/sos_30companies.csv` (relative to `scripts/`).
+			- Added shell-safe fallback for schedule/manual runs when inputs are empty.
+		- `README.md` and `scripts/README.md`
+			- Updated mode docs, latest run snapshots, workflow defaults, and top-of-funnel alert behavior.
+
+	- Validation:
+		- `python test_pipeline.py` passed.
+		- `python run_pipeline.py --sos test_data/sos_realistic.csv --mode hosted_discovery --soft-report --output-dir output_hosted_smoke` passed.
+		- `python -m py_compile run_pipeline.py daily_contract_runner.py build_csv.py` passed.
+
+	- Current known constraints after hardening:
+		- Hosted discovery still depends on network availability and free-source response quality.
+		- Strict verify still requires SMTP-capable self-hosted runner for mailbox-level validity.

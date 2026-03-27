@@ -157,6 +157,17 @@ def test_waterfall_enricher():
     check("Officer permutation generates candidates", len(perms) > 0)
     check("First candidate has email", '@example.com' in perms[0].get('email', ''))
 
+    # is_dm populated by filter_decision_makers (called inside waterfall_enrich after dedup)
+    raw_contacts = [
+        {'email': 'ceo@acme.com', 'source': 'officer_permutation', 'title': 'CEO'},
+        {'email': 'intern@acme.com', 'source': 'officer_permutation', 'title': 'Marketing Intern'},
+    ]
+    dm_result = filter_decision_makers(deduplicate(raw_contacts))
+    check("is_dm populated on every contact after waterfall",
+          all('is_dm' in c for c in dm_result), str(dm_result))
+    check("CEO is_dm=True", next(c for c in dm_result if 'ceo' in c['email'])['is_dm'] is True)
+    check("Intern is_dm=False", next(c for c in dm_result if 'intern' in c['email'])['is_dm'] is False)
+
 
 # ── Test: freshness_scorer ─────────────────────────────────────────────────────
 
@@ -427,14 +438,14 @@ def test_hubspot_export_gates():
     ok, reason = passes_quality(verified_officer)
     check("Officer permutation with SMTP acceptance passes", ok, f"reason: {reason}")
 
-    # Officer permutation without SMTP at C-level should now pass (C accepted)
+    # Officer permutation without SMTP at C-level should fail strict gate.
     unverified_officer = {
         **verified_officer,
         'smtp_ok': '',
         'confidence_level': 'C',
     }
     ok, reason = passes_quality(unverified_officer)
-    check("Officer permutation C-level passes (C now accepted)", ok, f"reason: {reason}")
+    check("Officer permutation C-level blocked at strict export gate", not ok, f"reason: {reason}")
 
     # D confidence should always fail
     low_confidence = {
@@ -465,7 +476,7 @@ def test_hubspot_export_dedupes_person_company():
     fieldnames = [
         'email', 'first_name', 'last_name', 'company', 'title', 'source',
         'mx_pass', 'verification_score', 'confidence_level', 'smtp_ok', 'catch_all',
-        'signal_tag', 'score_breakdown'
+            'signal_tag', 'score_breakdown', 'reject_reason'
     ]
     rows = [
         {
@@ -481,7 +492,8 @@ def test_hubspot_export_dedupes_person_company():
             'smtp_ok': 'ACCEPT',
             'catch_all': 'FALSE',
             'signal_tag': 'new_business',
-            'score_breakdown': 'test'
+                'score_breakdown': 'test',
+                'reject_reason': ''
         },
         {
             'email': 'john.peterson@example.com',
@@ -496,7 +508,8 @@ def test_hubspot_export_dedupes_person_company():
             'smtp_ok': 'ACCEPT',
             'catch_all': 'FALSE',
             'signal_tag': 'new_business',
-            'score_breakdown': 'test'
+                'score_breakdown': 'test',
+                'reject_reason': ''
         },
     ]
 
@@ -525,6 +538,14 @@ def test_hubspot_export_dedupes_person_company():
         check("Duplicate person/company gets explicit reject reason",
               'Duplicate person/company' in duplicate_reasons,
               str(duplicate_reasons))
+
+        # Verify reject_reason column is not duplicated when input already has it
+        with open(reject_path, newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            headers = next(reader)
+        check("reject_reason column appears exactly once in rejects.csv headers",
+              headers.count('reject_reason') == 1,
+              f"got headers={headers}")
     finally:
         os.unlink(input_path)
         os.unlink(output_path)
@@ -604,7 +625,7 @@ def test_smtp_transport_classification():
         soft_defer_row['confidence_level'] in ('C', 'D'),
         str(soft_defer_row))
 
-    # Export gate: transport-blocked B-tier officer_permutation passes (B accepted, no SMTP gate).
+    # Export gate (strict): transport-blocked B-tier officer_permutation is blocked.
     tb_b_row = {
       'email': 'john@testco.com',
       'company': 'Test Co',
@@ -616,15 +637,26 @@ def test_smtp_transport_classification():
       'catch_all': 'UNKNOWN',
       'smtp_status': 'transport_blocked',
     }
-    ok, reason = passes_quality(tb_b_row)
-    check("Transport-blocked B-tier officer_permutation passes export gate",
+    ok, reason = passes_quality(tb_b_row, mode='strict_verify')
+    check("Transport-blocked B-tier officer_permutation blocked at strict export gate",
+        not ok, f"should have failed; got ok={ok}, reason={reason}")
+
+    # Export gate (hosted): transport-blocked B-tier can pass as provisional.
+    ok, reason = passes_quality(tb_b_row, mode='hosted_discovery')
+    check("Transport-blocked B-tier officer_permutation allowed in hosted discovery mode",
         ok, f"should have passed; got ok={ok}, reason={reason}")
 
-    # Export gate: C-tier officer_permutation passes (C now accepted).
+    # Export gate: SMTP-rejected officer_permutation blocked even if confidence is B.
+    reject_b_row = {**tb_b_row, 'smtp_ok': 'REJECT', 'smtp_status': 'reject_target'}
+    ok, reason = passes_quality(reject_b_row)
+    check("SMTP-rejected officer_permutation blocked at export gate",
+        not ok, f"should have failed; got ok={ok}, reason={reason}")
+
+    # Export gate: soft-defer C-tier officer_permutation blocked (confidence gate fires).
     soft_c_row = {**tb_b_row, 'smtp_status': 'soft_defer_4xx', 'confidence_level': 'C'}
     ok, reason = passes_quality(soft_c_row)
-    check("C-tier officer_permutation passes export gate",
-        ok, f"should have passed; got ok={ok}, reason={reason}")
+    check("C-tier officer_permutation blocked at strict export gate",
+        not ok, f"should have failed; got ok={ok}, reason={reason}")
 
     # Export gate: D-tier should still be blocked.
     d_row = {**tb_b_row, 'confidence_level': 'D'}

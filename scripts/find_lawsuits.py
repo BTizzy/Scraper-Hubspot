@@ -41,6 +41,27 @@ LAWSUIT_EVIDENCE_TERMS = re.compile(
     re.IGNORECASE,
 )
 
+RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
+
+
+def get_with_retry(url, *, params=None, headers=None, timeout=12, retries=2, backoff_seconds=0.8):
+    """Perform GET with exponential backoff for transient network/API failures."""
+    last_error = ''
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=timeout)
+            if resp.status_code in RETRYABLE_HTTP_CODES and attempt < retries:
+                time.sleep(backoff_seconds * (2 ** attempt))
+                continue
+            return resp, ''
+        except requests.exceptions.RequestException as exc:
+            last_error = str(exc)
+            if attempt < retries:
+                time.sleep(backoff_seconds * (2 ** attempt))
+                continue
+            return None, last_error
+    return None, last_error
+
 
 def _get_api_token():
     """Read CourtListener API token from env or config."""
@@ -75,7 +96,21 @@ def query_courtlistener_v4(name, since_date):
     }
     headers = {'Authorization': f'Token {token}'}
     try:
-        r = requests.get(CL_SEARCH, params=params, headers=headers, timeout=15)
+        r, req_error = get_with_retry(
+            CL_SEARCH,
+            params=params,
+            headers=headers,
+            timeout=15,
+            retries=2,
+            backoff_seconds=1.0,
+        )
+        if r is None:
+            return {
+                'results': [],
+                'status': 'request_error',
+                'http_status': '',
+                'error': req_error or 'request failed after retries',
+            }
         http_status = r.status_code
         if http_status == 429:
             return {
@@ -165,7 +200,21 @@ def query_duckduckgo_lawsuits(name):
     """Fallback: DuckDuckGo dork for lawsuit evidence when API unavailable."""
     query = f'site:courtlistener.com "{name}"'
     try:
-        r = requests.get(DDG_HTML, params={'q': query}, headers=HEADERS, timeout=12)
+        r, req_error = get_with_retry(
+            DDG_HTML,
+            params={'q': query},
+            headers=HEADERS,
+            timeout=12,
+            retries=2,
+            backoff_seconds=0.8,
+        )
+        if r is None:
+            return {
+                'results': [],
+                'status': 'request_error',
+                'http_status': '',
+                'error': req_error or 'DDG request failed after retries',
+            }
         if r.status_code >= 400:
             return {
                 'results': [],
