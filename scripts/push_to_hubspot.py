@@ -25,7 +25,20 @@ load_local_env()
 
 HUBSPOT_API_BASE = 'https://api.hubapi.com/crm/v3/objects/contacts'
 
-# Map CSV headers to HubSpot property internal names
+# Map CSV headers to HubSpot property internal names.
+#
+# REQUIRED CUSTOM PROPERTIES — create these once in HubSpot before pushing:
+#   Property name (internal)  | Label            | Field type
+#   ──────────────────────────┼──────────────────┼───────────────────────
+#   lead_signal               | Lead Signal      | Single-line text
+#   lead_confidence           | Lead Confidence  | Single-line text
+#   lead_score_notes          | Lead Score Notes | Multi-line text
+#
+# DO NOT use hs_lead_status (system enum) or business_type (system select)
+# for custom values — HubSpot will reject them as invalid enum options.
+#
+# LinkedIn: HubSpot v3 uses 'hs_linkedin_profile_url' on Growth+ tiers.
+# Change the value below if your portal uses a different internal name.
 FIELD_MAP = {
     'Email': 'email',
     'First Name': 'firstname',
@@ -35,9 +48,9 @@ FIELD_MAP = {
     'Phone': 'phone',
     'Website': 'website',
     'City': 'city',
-    'Signal Tag': 'hs_lead_status',
-    'LinkedIn URL': 'hs_linkedin_url',
-    'Confidence Level': 'business_type',  # repurpose existing custom property
+    'Signal Tag': 'lead_signal',           # custom text property (see above)
+    'LinkedIn URL': 'hs_linkedin_profile_url',
+    'Confidence Level': 'lead_confidence', # custom text property (see above)
 }
 
 
@@ -108,10 +121,11 @@ def row_to_properties(row: dict) -> dict:
         value = (row.get(csv_col) or '').strip()
         if value:
             properties[hs_prop] = value
-    # Add notes as a note body if present
+    # Add score breakdown notes to a custom text property.
+    # notes_last_contacted is a HubSpot datetime field — do not use it for text.
     notes = (row.get('Notes') or '').strip()
     if notes:
-        properties['notes_last_contacted'] = notes[:500]
+        properties['lead_score_notes'] = notes[:500]
     return properties
 
 

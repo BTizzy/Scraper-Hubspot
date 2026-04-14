@@ -14,6 +14,7 @@ import smtplib
 import random
 import string
 import time
+import requests
 from datetime import datetime, UTC
 
 GENERIC_LOCAL = ['info', 'hello', 'contact', 'admin', 'support', 'office', 'team', 'sales', 'noreply', 'mail']
@@ -52,6 +53,99 @@ def detect_mx_provider(mx_host: str) -> str:
         if h.endswith('.' + known):
             return provider
     return ''
+
+
+def coerce_bool(value):
+    """Normalize common truthy / falsy API values to bool or None."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {'true', '1', 'yes', 'y', 'ok', 'pass', 'deliverable', 'valid', 'accept', 'accepted'}:
+        return True
+    if text in {'false', '0', 'no', 'n', 'fail', 'undeliverable', 'invalid', 'reject', 'rejected'}:
+        return False
+    return None
+
+
+def lookup_payload_value(payload, keys):
+    """Search for the first matching key in a nested API payload."""
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        if key in payload:
+            return payload[key]
+    for value in payload.values():
+        if isinstance(value, dict):
+            found = lookup_payload_value(value, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def parse_verifier_api_result(payload):
+    """Map common self-hosted verifier JSON payloads into internal verdict fields."""
+    data = payload or {}
+    if isinstance(data, dict):
+        for wrapper_key in ('data', 'result', 'response'):
+            wrapped = data.get(wrapper_key)
+            if isinstance(wrapped, dict):
+                data = wrapped
+                break
+
+    deliverable = coerce_bool(lookup_payload_value(data, (
+        'deliverable', 'is_deliverable', 'is_reachable', 'reachable', 'valid', 'smtp_check'
+    )))
+    catch_all = coerce_bool(lookup_payload_value(data, (
+        'catch_all', 'catchall', 'accept_all', 'acceptAll', 'is_catchall'
+    )))
+    mx_found = coerce_bool(lookup_payload_value(data, (
+        'mx_found', 'mxFound', 'mx_lookup', 'has_mx_records', 'mx', 'mx_records'
+    )))
+    raw_status = lookup_payload_value(data, ('status', 'result', 'reason', 'message', 'smtp_status'))
+
+    if deliverable is True:
+        smtp_ok = 'ACCEPT'
+    elif deliverable is False and (mx_found is not False or raw_status is not None):
+        smtp_ok = 'REJECT'
+    else:
+        smtp_ok = 'UNKNOWN'
+
+    if catch_all is True:
+        catch_all_text = 'TRUE'
+    elif catch_all is False:
+        catch_all_text = 'FALSE'
+    else:
+        catch_all_text = 'UNKNOWN'
+
+    status_suffix = (str(raw_status).strip().lower().replace(' ', '_') if raw_status else '')
+    if not status_suffix:
+        status_suffix = 'deliverable' if smtp_ok == 'ACCEPT' else 'undeliverable' if smtp_ok == 'REJECT' else 'unknown'
+    return smtp_ok, catch_all_text, f'verifier_api:{status_suffix}'
+
+
+def verifier_api_lookup(email, api_url, api_token=''):
+    """Query a self-hosted verifier API. Defaults to Trumail-style GET semantics."""
+    base = (api_url or '').strip()
+    if not base:
+        return None
+
+    params = {}
+    request_url = base
+    if '{email}' in base or '{token}' in base:
+        request_url = base.format(email=email, token=api_token or '')
+    else:
+        request_url = base.rstrip('/')
+        if '/v2/lookups/' not in request_url and not request_url.endswith('/verify') and not request_url.endswith('/check'):
+            request_url = request_url + '/v2/lookups/json'
+        params['email'] = email
+        if api_token:
+            params['token'] = api_token
+
+    resp = requests.get(request_url, params=params or None, timeout=10)
+    resp.raise_for_status()
+    return parse_verifier_api_result(resp.json())
 
 def verify_email_domain(email):
     """Check if domain can receive email: MX record first, then A record fallback (RFC 5321 §5)."""
@@ -246,14 +340,20 @@ def smtp_check(email, from_address='verify@example.com', attempts=1):
     return 'UNKNOWN', 'UNKNOWN', 'probe_failed'
 
 
-def score_email(email, source='', smtp=False, smtp_cache=None):
+def score_email(email, source='', smtp=False, smtp_cache=None,
+                verifier_api_url='', verifier_api_token='', verifier_cache=None,
+                mx_checker=None, age_lookup=None, smtp_checker=None, verifier_lookup=None):
+    mx_checker = mx_checker or verify_email_domain
+    age_lookup = age_lookup or domain_age_days
+    smtp_checker = smtp_checker or smtp_check
+    verifier_lookup = verifier_lookup or verifier_api_lookup
     if is_generic(email):
         return 'REJECT — generic address', None, None, '', '', 'generic_local', False
-    mx = verify_email_domain(email)
+    mx = mx_checker(email)
     domain = email.split('@',1)[1] if '@' in email else ''
     age = None
     try:
-        age = domain_age_days(domain)
+        age = age_lookup(domain)
     except Exception:
         age = None
     smtp_ok = ''
@@ -269,7 +369,7 @@ def score_email(email, source='', smtp=False, smtp_cache=None):
         else:
             smtp_attempted = True
             try:
-                smtp_ok, catch_all, smtp_status = smtp_check(email)
+                smtp_ok, catch_all, smtp_status = smtp_checker(email)
                 # Cache only transport/infrastructure outcomes that are domain-level,
                 # not mailbox-level (do not cache ACCEPT/REJECT target results).
                 if smtp_cache is not None and smtp_status in (
@@ -280,6 +380,26 @@ def score_email(email, source='', smtp=False, smtp_cache=None):
                 smtp_ok, catch_all, smtp_status = 'UNKNOWN', 'UNKNOWN', 'probe_exception'
     elif smtp and not mx:
         smtp_status = 'skipped_no_mx'
+
+    if mx and verifier_api_url and (
+        not smtp or smtp_status in ('not_attempted', 'transport_blocked', 'mx_lookup_failed', 'probe_failed', 'soft_defer_4xx', 'probe_exception')
+    ):
+        cache_key = email.lower().strip()
+        api_result = None
+        if verifier_cache is not None and cache_key in verifier_cache:
+            api_result = verifier_cache[cache_key]
+        else:
+            try:
+                api_result = verifier_lookup(email, verifier_api_url, verifier_api_token)
+                if verifier_cache is not None and api_result is not None:
+                    verifier_cache[cache_key] = api_result
+            except Exception:
+                api_result = ('UNKNOWN', 'UNKNOWN', 'verifier_api:error')
+        if api_result is not None:
+            api_smtp_ok, api_catch_all, api_status = api_result
+            if api_smtp_ok != 'UNKNOWN' or api_catch_all != 'UNKNOWN' or api_status != 'verifier_api:unknown':
+                smtp_ok, catch_all, smtp_status = api_smtp_ok, api_catch_all, api_status
+                smtp_attempted = True
 
     if not mx:
         return 'REJECT — dead domain', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
@@ -304,15 +424,19 @@ def score_email(email, source='', smtp=False, smtp_cache=None):
             # Mark as PASS so it flows through; scorer will cap confidence at C.
             return 'PASS', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
 
+    if (smtp_ok or '').strip().upper() == 'REJECT':
+        return 'REJECT — mailbox rejected', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
+
     return 'PASS', mx, age, smtp_ok, catch_all, smtp_status, smtp_attempted
 
-def verify(input_csv, output_csv, smtp=False):
+def verify(input_csv, output_csv, smtp=False, verifier_api_url='', verifier_api_token=''):
     with open(input_csv, newline='', encoding='utf-8') as fin, open(output_csv, 'w', newline='', encoding='utf-8') as fout:
         reader = csv.DictReader(fin)
         fieldnames = reader.fieldnames + ['mx_pass', 'reject_reason', 'verification_score', 'domain_age_days', 'smtp_ok', 'catch_all', 'smtp_status', 'smtp_attempted']
         writer = csv.DictWriter(fout, fieldnames=fieldnames)
         writer.writeheader()
         smtp_cache = {}
+        verifier_cache = {}
         for row in reader:
             email = row.get('email', '').strip()
             if not email:
@@ -332,6 +456,9 @@ def verify(input_csv, output_csv, smtp=False):
                 source=row.get('source', ''),
                 smtp=smtp,
                 smtp_cache=smtp_cache,
+                verifier_api_url=verifier_api_url,
+                verifier_api_token=verifier_api_token,
+                verifier_cache=verifier_cache,
             )
             row['verification_score'] = score
             row['domain_age_days'] = age if age is not None else ''
@@ -353,8 +480,12 @@ def main():
     parser.add_argument('--input', '-i', required=True)
     parser.add_argument('--output', '-o', required=True)
     parser.add_argument('--smtp', action='store_true', help='Enable SMTP RCPT checks (may be blocked by mail servers)')
+    parser.add_argument('--verifier-api-url', default='', help='Optional self-hosted verifier API URL (Trumail-style by default)')
+    parser.add_argument('--verifier-api-token', default='', help='Optional token for the verifier API')
     args = parser.parse_args()
-    verify(args.input, args.output, smtp=args.smtp)
+    verify(args.input, args.output, smtp=args.smtp,
+           verifier_api_url=args.verifier_api_url,
+           verifier_api_token=args.verifier_api_token)
 
 if __name__ == '__main__':
     main()

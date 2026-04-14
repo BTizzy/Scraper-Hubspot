@@ -149,12 +149,52 @@ EXECUTION_MODES = {
         "use_smtp": False,
         "contract_hard_fail": False,
         "build_hubspot_export": False,
+        "skip_theharvester": True,
+        "skip_dorks": True,
     },
     "strict_verify": {
         "use_smtp": True,
         "contract_hard_fail": True,
         "build_hubspot_export": True,
+        "skip_theharvester": False,
+        "skip_dorks": False,
     },
+}
+
+# ── Phase 3 Quality Floodgates ───────────────────────────────────────────────
+# These gates preserve lead quality as acquisition volume rises.
+QUALITY_FLOODGATES = {
+    # Hosted discovery can allow transport-blocked officer permutations only
+    # when corroborated by another source (source_count >= 2).
+    "hosted_min_source_count_for_provisional_officer": 2,
+    # Parse source_sources fallback when source_count is missing.
+    "enable_source_consensus_gate": True,
+}
+
+# ── Hosted Launch Targets ────────────────────────────────────────────────────
+# These targets define whether GitHub-hosted discovery is good enough to act as
+# the production path for Trillium's free Apollo replacement promise.
+HOSTED_LAUNCH_TARGETS = {
+    # Business target: 500 quality leads per week from hosted-only operations.
+    "target_weekly_quality_leads": 500,
+    "target_daily_quality_leads": 72,
+    # Minimum acceptable share of scored leads that are A/B/C candidates.
+    "min_quality_lead_rate": 0.18,
+    # Avoid relying on a single source for most output.
+    "max_single_source_dominance": 0.65,
+    "min_distinct_sources": 2,
+    # Officer permutations can assist, but cannot dominate the pipeline.
+    "max_officer_permutation_share": 0.45,
+    # Benchmark/soak execution budgets for GitHub-hosted runners.
+    "max_benchmark_runtime_seconds": 900,
+    "max_soak_runtime_seconds": 2400,
+    # Daily company-processing assumption used for weekly capacity projections.
+    "assumed_daily_company_capacity": 120,
+}
+
+BENCHMARK_DATASETS = {
+    "benchmark": "test_data/sos_direct_evidence.csv",
+    "soak": "test_data/sos_realistic.csv",
 }
 
 
@@ -172,6 +212,21 @@ def get_execution_mode_config(mode: str) -> dict:
     key = (mode or "strict_verify").strip().lower()
     selected = EXECUTION_MODES.get(key, EXECUTION_MODES["strict_verify"])
     return dict(selected)
+
+
+def get_quality_floodgates() -> dict:
+    """Return a defensive copy of source-quality floodgate settings."""
+    return dict(QUALITY_FLOODGATES)
+
+
+def get_hosted_launch_targets() -> dict:
+    """Return hosted-only launch targets for readiness evaluation."""
+    return dict(HOSTED_LAUNCH_TARGETS)
+
+
+def get_benchmark_datasets() -> dict:
+    """Return default benchmark and soak datasets used for readiness checks."""
+    return dict(BENCHMARK_DATASETS)
 
 def get_signal_priority(tag: str) -> int:
     """Return priority weight for a signal tag, or 0 if unknown."""

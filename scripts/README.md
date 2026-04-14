@@ -1,333 +1,201 @@
-# Trillium Hiring — Lead Builder Pipeline v2
+# Trillium Lead Pipeline
 
-**The best open-source lead builder for [trilliumhiring.com](https://trilliumhiring.com)**
+Free, GitHub-hosted lead generation for Trillium's Seattle-area SMB outbound motion.
 
-Build verified, HubSpot-ready contact lists for Seattle metro (King County) using only free tools, public records, and zero-cost APIs. Designed for 5-30 employee companies with active buying signals.
+This repository is being built to replace an Apollo subscription with a workflow that:
 
----
+- runs on GitHub-hosted runners
+- uses free and public data sources
+- scores contact quality instead of pretending every row is mailbox-verified
+- proves launch readiness before any CRM write-path testing
 
-## Architecture
+HubSpot compatibility is intentionally not the focus of this phase. The current goal is simple: produce enough qualified leads, cheaply and repeatably, to support a target of 500 quality leads per week.
 
-Inspired by how **Apollo.io** builds their 265M-contact database:
+## What This Pipeline Does
 
-```
-WA SOS Export (.csv)
-    │
-    ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Step 1: Company Enrichment (OpenCorporates)                │
-│  Step 2: Headcount Estimation (team page spider)            │
-│  Step 3: Lawsuit Detection (CourtListener API)              │
-│  Step 4: Rebrand Detection (OC prev names + website scan)   │
-├─────────────────────────────────────────────────────────────┤
-│  Step 5: WATERFALL CONTACT ENRICHMENT                       │
-│    Source 1: theHarvester (30+ search engines)               │
-│    Source 2: Team page email scraper                         │
-│    Source 3: Officer name → email permutation                │
-│    Source 4: Hunter.io (25 free/month)                       │
-│    Source 5: DuckDuckGo dork search                          │
-├─────────────────────────────────────────────────────────────┤
-│  Step 6: Email Verification (MX + SMTP + catch-all)         │
-│  Step 7: Freshness Scoring (A/B/C/D confidence tiers)       │
-│  Step 8: HubSpot CSV Builder (quality-gated)                │
-└─────────────────────────────────────────────────────────────┘
-    │
-    ▼
-hubspot_import.csv  ←  Ready to import into HubSpot
-```
+The pipeline starts from a Washington SOS export, enriches company context, discovers contacts from multiple free sources, verifies what can be verified in a hosted environment, scores quality, and emits readiness artifacts.
 
-### How it compares to Apollo
+Core stages:
 
-| Capability | Apollo (paid) | This pipeline (free) |
-|---|---|---|
-| Data sources | 2M contributors + web crawl + 3rd party | 5-source waterfall (theHarvester, team pages, officer records, Hunter free, dorks) |
-| Email verification | 7-step, 91% accuracy | MX + SMTP RCPT + catch-all detection |
-| Freshness scoring | Real-time updates, 150M/month refresh | Exponential decay model + signal recency |
-| Email permutation | Pattern-based + ML prediction | 10 B2B patterns + name inference from team pages |
-| Confidence tiers | Verified / Semi-verified / Guessed | A / B / C / D with configurable thresholds |
-| Buying signals | Intent data ($$) | Lawsuits, rebrands, new formations, headcount |
-| Cost | $49-119/mo per user | $0 (only free APIs) |
+1. Company enrichment
+2. Headcount estimation
+3. Lawsuit detection
+4. Rebrand detection
+5. Multi-source contact discovery
+6. Email verification with MX-first logic and optional SMTP
+7. Freshness and confidence scoring
+8. Hosted readiness evaluation
 
----
+The production launch path is `hosted_discovery`, not `strict_verify`.
 
-## Setup
+## Launch Model
+
+Two execution modes exist, but they are not equal:
+
+- `hosted_discovery`: default mode, designed for GitHub-hosted runners, no SMTP requirement, used for launch readiness.
+- `strict_verify`: optional internal validation mode, requires SMTP egress, useful for comparison and later CRM hardening.
+
+The product promise for this phase is the hosted path. If the hosted path cannot hit weekly capacity with acceptable quality and source diversity, the product is not ready.
+
+## Free-Path Commands
+
+Setup:
 
 ```bash
-# 1. Clone and navigate
-cd Scraper-Hubspot/scripts
-
-# 2. Create virtual environment
+cd /workspaces/Scraper-Hubspot/scripts
 python3 -m venv .venv
 source .venv/bin/activate
-
-# 3. Install dependencies
 pip install -r requirements.txt
 ```
 
-### Optional: API keys
-
-Set these environment variables for enhanced discovery:
+Run the hosted pipeline locally:
 
 ```bash
-# Hunter.io (25 free searches/month — https://hunter.io/api)
-export HUNTER_API_KEY=your_key_here
+python run_pipeline.py \
+    --sos test_data/sos_direct_evidence.csv \
+    --mode hosted_discovery \
+    --soft-report \
+    --min-level C
 ```
 
----
-
-## Quick Start
-
-### One-command pipeline
+Run the daily hosted wrapper:
 
 ```bash
-# Basic (no API keys needed):
-python run_pipeline.py --sos sos_export.csv
-
-# Full power (SMTP verification + Hunter.io):
-python run_pipeline.py --sos sos_export.csv --smtp --hunter-key YOUR_KEY
-
-# Fast mode (skip slow sources, A+B leads only):
-python run_pipeline.py --sos sos_export.csv --skip-theharvester --skip-dorks --min-level B
-
-# Dry run (see plan without executing):
-python run_pipeline.py --sos sos_export.csv --dry-run
-
-# Hosted discovery mode (GitHub-hosted runner, soft-report):
-python run_pipeline.py --sos test_data/sos_30companies.csv --mode hosted_discovery --soft-report --min-level B
-
-# Strict verify mode (self-hosted runner with SMTP egress):
-python run_pipeline.py --sos test_data/sos_30companies.csv --mode strict_verify --smtp --min-level B
+python daily_run.py \
+    --sos test_data/sos_direct_evidence.csv \
+    --mode hosted_discovery \
+    --min-level C
 ```
 
-### Execution Modes
-
-- `hosted_discovery`: no SMTP requirement, soft-report friendly, intended for GitHub-hosted runs.
-- `strict_verify`: mailbox-validity enforcement with SMTP acceptance, intended for self-hosted runs.
-
-`build_csv.py` quality gates are mode-aware:
-- strict mode blocks officer-permutation rows without SMTP acceptance.
-- hosted mode allows provisional transport-blocked rows for diagnostics only.
-
-### Top-Of-Funnel Alerts
-
-`run_pipeline.py` emits `top_of_funnel_alerts` in console and KPI JSON when discovery quality collapses:
-
-- `no_contacts_discovered`
-- `source_diversity_low_single_source`
-- `source_dominance_high:<source>:<share>`
-- `officer_permutation_only`
-
-Use these alerts to catch upstream acquisition regressions before strict export evaluation.
-
-### GitHub Workflow Defaults
-
-Workflow file: `.github/workflows/lead-pipeline.yml`
-
-- Default SOS input: `test_data/sos_30companies.csv` (relative to `scripts/`).
-- Hosted job runs first and uploads discovery artifacts.
-- Self-hosted job runs strict verification and uploads strict artifacts.
-- Schedule/manual runs both fall back safely to the default SOS path when inputs are empty.
-
-### Daily Novel-List Runner
-
-Use the daily wrapper to avoid repeating the same companies/contacts across days.
+Run the contract-style hosted driver:
 
 ```bash
-# Daily run with cross-day state (recommended)
-python daily_run.py --sos sos_export.csv --smtp --min-level B
-
-# Optional: fast mode + custom output root
-python daily_run.py --sos sos_export.csv --skip-theharvester --skip-dorks --output-root daily_output
-```
-
-What it does:
-- Filters out companies already processed in earlier runs (state file)
-- Runs the normal pipeline on only novel companies
-- Filters HubSpot export to only novel contact emails
-- Writes date-stamped output folders for auditability
-
-State files created:
-- `state/seen_companies.csv`
-- `state/seen_emails.csv`
-
-### Daily Contract Runner (Real Active Emails)
-
-Use this when you need a fixed daily volume of real active emails that also meets
-the signal contract. It runs multiple pipeline batches in one day and stops only
-when targets are met or input is exhausted.
-
-```bash
-# Contract-driven run (requires SMTP for real active verification)
 python daily_contract_runner.py \
-    --sos sos_export.csv \
-    --smtp \
+    --sos test_data/sos_direct_evidence.csv \
+    --mode hosted_discovery \
     --batch-size 40 \
     --max-batches 20 \
     --state-dir state \
     --output-root daily_output \
     --run-name contract_day
-
-# Optional: override daily active target
-python daily_contract_runner.py --sos sos_export.csv --smtp --target-active-emails 60
 ```
 
-### Multi-Source Input Pool Builder
-
-Build a larger daily input pool from multiple local CSVs plus web discovery,
-then feed it into the contract runner.
+Optional strict verification path:
 
 ```bash
-# Build a normalized pool (domain required by default)
-python build_input_pool.py \
-    --sos sos_export.csv \
-    --manual manual_companies.csv \
-    --exclude-state-dir state \
-    --max-runtime-minutes 90 \
-    --output input_pool.csv
-
-# Run contract flow from the pool
-python daily_contract_runner.py \
-    --input-pool input_pool.csv \
+python run_pipeline.py \
+    --sos test_data/sos_direct_evidence.csv \
+    --mode strict_verify \
     --smtp \
-    --batch-size 40 \
-    --max-batches 20
+    --min-level B
 ```
 
-Main pool builder outputs:
-- `input_pool.csv`
-- `input_pool_report.json` (or `<output>_report.json`)
+## GitHub Actions Path
 
-Pool builder source modes in V1:
-- Registry/domain enrichment per company (`collect_companies` helpers)
-- Search discovery (broad public web results)
-- Jobs/news discovery (hiring and growth intent style queries)
+The workflow lives in [.github/workflows/lead-pipeline.yml](/workspaces/Scraper-Hubspot/.github/workflows/lead-pipeline.yml).
 
-Useful flags:
-- `--disable-search-discovery`
-- `--disable-jobs-news-discovery`
-- `--disable-domain-enrichment`
-- `--allow-missing-domain` (disabled by default)
+Current intent:
 
-Real active email criteria:
-- `confidence_level` is `A` or `B`
-- `smtp_ok` is `ACCEPT` (or `TRUE`)
-- `catch_all` is `FALSE`
-- `mx_pass` is `TRUE`
+- default benchmark dataset: `test_data/sos_direct_evidence.csv`
+- hosted execution is the primary workflow path
+- readiness evaluation runs after pipeline completion
+- no self-hosted runner is required for launch proof
 
-Main outputs:
-- `daily_output/<date_run>/contacts_scored_consolidated.csv`
-- `daily_output/<date_run>/real_active_emails.csv`
-- `daily_output/<date_run>/hubspot_import.csv`
-- `daily_output/<date_run>/daily_contract_summary.json`
-
-### Individual scripts
+To build or refresh the benchmark from candidate company rows:
 
 ```bash
-# Enrich companies from WA SOS export
-python collect_companies.py --input sos_export.csv --output companies_enriched.csv
-
-# Estimate headcount from team pages
-python estimate_headcount.py --input companies_enriched.csv --output companies_sized.csv
-
-# Detect lawsuit signals
-python find_lawsuits.py --input companies_sized.csv --output companies_lawsuits.csv
-
-# Detect rebrands
-python find_rebrands.py --input companies_lawsuits.csv --output companies_rebrands.csv
-
-# Waterfall contact discovery (5 sources)
-python waterfall_enricher.py --input companies_rebrands.csv --output contacts_raw.csv
-
-# Verify emails (MX + optional SMTP)
-python verify_emails.py --input contacts_raw.csv --output contacts_verified.csv --smtp
-
-# Score freshness and confidence
-python freshness_scorer.py --input contacts_verified.csv --output contacts_scored.csv --min-level B
-
-# Build HubSpot CSV
-python build_csv.py --input contacts_scored_qualified.csv --output hubspot_import.csv
+python build_benchmark_dataset.py \
+    --input your_candidate_rows.csv \
+    --output test_data/sos_direct_evidence.csv \
+    --target-rows 25
 ```
 
-### Email permutation (standalone)
+This is what keeps the system aligned with the "100% free" requirement.
+
+## Output Artifacts
+
+Important outputs from a hosted run:
+
+- `output/contacts_raw.csv`
+- `output/contacts_verified.csv`
+- `output/contacts_scored.csv`
+- `output/contacts_scored_qualified.csv`
+- `output/daily_kpi_report.json`
+- `output/run_contract_report.json`
+- `output/hosted_readiness_report.json`
+
+The most important artifact is `hosted_readiness_report.json`. That file answers whether the hosted-only path is currently fit to launch.
+
+## Readiness Criteria
+
+Hosted readiness is evaluated against config in [trillium_config.py](/workspaces/Scraper-Hubspot/scripts/trillium_config.py), including:
+
+- projected daily and weekly qualified lead volume
+- minimum quality lead rate
+- source diversity floor
+- single-source dominance cap
+- officer permutation share cap
+- runtime budget
+
+A pipeline run can look healthy in raw row count and still fail readiness if it is overly dependent on a weak source or if projected weekly throughput misses target.
+
+## Data Quality Model
+
+This system uses confidence tiers `A` through `D` plus source provenance and verification signals.
+
+Important distinction:
+
+- hosted quality means the row is acceptable for the free launch path
+- strict quality means the row satisfies tighter mailbox-validity expectations with SMTP support
+
+That distinction matters because GitHub-hosted runners cannot be treated as if they have self-hosted SMTP capabilities.
+
+## Source Strategy
+
+The contact acquisition layer is intentionally multi-source. The current architecture is built around free methods such as:
+
+- theHarvester
+- team and contact page extraction
+- sitewide email scanning
+- officer-name permutation fallback
+- public search-based discovery
+
+The quality model penalizes weak-source concentration so that volume cannot be faked by flooding the output with permutation-only rows.
+
+## Test Commands
+
+Regression suite:
 
 ```bash
-# Single person
-python email_permutator.py --first Jane --last Doe --domain seattlestudio.com
-
-# Batch from CSV
-python email_permutator.py --input officers.csv --output permuted_emails.csv --verify
+python test_pipeline.py
 ```
 
----
+The readiness evaluator has dedicated synthetic coverage in [test_pipeline.py](/workspaces/Scraper-Hubspot/scripts/test_pipeline.py).
 
-## Input Format
+## Scope For This Phase
 
-**WA SOS Export** (`sos_export.csv`):
-- Source: [WA Secretary of State CCFS](https://ccfs.sos.wa.gov) → Advanced Search → New Entity → County: King
-- Required columns: `company_name`, `registered_date`
-- Optional columns: `website`, `domain`, `officers` (JSON array)
+In scope now:
 
----
+- prove the hosted path can generate enough qualified leads
+- keep the operating path fully free
+- tighten readiness gates and artifact reporting
+- improve acquisition quality and source diversity
 
-## Output Files
+Not in scope yet:
 
-| File | Description |
-|---|---|
-| `output/companies_enriched.csv` | WA SOS + OpenCorporates data |
-| `output/companies_sized.csv` | + headcount estimate (5-30 filter) |
-| `output/companies_lawsuits.csv` | + CourtListener lawsuit signals |
-| `output/companies_rebrands.csv` | + rebrand detection signals |
-| `output/contacts_raw.csv` | All discovered emails (5 sources) |
-| `output/contacts_verified.csv` | + MX/SMTP verification scores |
-| `output/contacts_scored.csv` | + freshness/confidence scores (A-D) |
-| `output/contacts_scored_qualified.csv` | Only records meeting min confidence |
-| `output/hubspot_import.csv` | **HubSpot-ready import file** |
-| `output/rejects.csv` | Records that failed quality gates |
+- HubSpot compatibility sign-off
+- paid enrichment dependencies
+- requiring self-hosted infrastructure to claim success
 
----
+## Relevant Files
 
-## File Reference
+- [run_pipeline.py](/workspaces/Scraper-Hubspot/scripts/run_pipeline.py)
+- [hosted_readiness.py](/workspaces/Scraper-Hubspot/scripts/hosted_readiness.py)
+- [daily_run.py](/workspaces/Scraper-Hubspot/scripts/daily_run.py)
+- [daily_contract_runner.py](/workspaces/Scraper-Hubspot/scripts/daily_contract_runner.py)
+- [trillium_config.py](/workspaces/Scraper-Hubspot/scripts/trillium_config.py)
+- [test_pipeline.py](/workspaces/Scraper-Hubspot/scripts/test_pipeline.py)
 
-| Script | Purpose | Key Technique |
-|---|---|---|
-| `trillium_config.py` | ICP configuration (single source of truth) | Target cities, titles, signals, patterns, thresholds |
-| `collect_companies.py` | Company enrichment | OpenCorporates API (WA jurisdiction) |
-| `estimate_headcount.py` | Team size estimation | Team page spider (10 URL paths) |
-| `find_lawsuits.py` | Litigation signal detection | CourtListener REST API |
-| `find_rebrands.py` | Rebrand detection | OC previous names + website keyword scan |
-| `waterfall_enricher.py` | **Multi-source contact discovery** | 5-source waterfall with dedup (theHarvester + h8mail inspired) |
-| `email_permutator.py` | **Email pattern generation** | 10 B2B patterns + MX + SMTP verify + scoring |
-| `verify_emails.py` | Email verification | MX + WHOIS age + SMTP RCPT + catch-all |
-| `freshness_scorer.py` | **Confidence scoring** | Exponential decay + source quality + signal weight |
-| `build_csv.py` | HubSpot CSV output | Quality gates + exact HubSpot headers |
-| `run_pipeline.py` | **Pipeline orchestrator** | 8-step sequential runner with summary dashboard |
+## Bottom Line
 
----
-
-## Configuration
-
-Edit `trillium_config.py` to customize:
-
-- **Geography**: `TARGET_CITIES` — Seattle metro area municipalities
-- **Company size**: `MIN_EMPLOYEES` / `MAX_EMPLOYEES` (default: 5-30)
-- **Decision-maker titles**: `DM_TITLES` — owner, CEO, founder, HR director, etc.
-- **Buying signals**: `SIGNALS` dict with priority weights (lawsuit=100, new_business=90, etc.)
-- **Email patterns**: `EMAIL_PATTERNS` — 10 common B2B patterns
-- **Freshness decay**: `FRESHNESS_HALF_LIFE_DAYS` — data loses half its value every N days (default: 90)
-- **Confidence thresholds**: `VERIFICATION_LEVELS` — A/B/C/D tier definitions
-
----
-
-## Design Principles
-
-1. **Waterfall, not shotgun** — Sources are tried in priority order. Each adds what previous ones missed. (Inspired by theHarvester's 30+ module architecture)
-2. **Score everything** — Every record gets a composite freshness score based on source quality, verification depth, signal strength, and data age. (Inspired by Apollo's 7-step verification)
-3. **Fresh data wins** — Exponential decay means a 90-day-old lead is worth half as much. Signals like lawsuits and new filings push records to the top. (Inspired by Apollo's 150M/month refresh cycle)
-4. **Zero cost** — Every tool and API used is free tier. Hunter.io is optional (25 free/month). No scrapy, no proxies, no paid databases.
-5. **HubSpot-native** — Output CSV uses exact HubSpot import headers. Import → done.
-
----
-
-## License
-
-CC0 — use however you like.
+This repo should be judged like a product, not a scraper demo. The bar is not "did it emit a CSV"; the bar is whether the hosted, free path can reliably produce enough quality outbound leads each week to replace Apollo for this use case.

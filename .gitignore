@@ -27,7 +27,13 @@ Thumbs.db
 # Pipeline outputs (regenerated on each run)
 scripts/test_data/output/
 scripts/waterfall_outputs/
+scripts/output*/
+scripts/daily_output*/
+scripts/state*/
 
 # Secrets
 .env
+scripts/.env
+scripts/local_secrets.py
+scripts/*secrets*.py
 *.key

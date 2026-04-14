@@ -216,6 +216,25 @@ def value_counts(rows, field, empty_label='(empty)'):
     return counts
 
 
+def provenance_counts(rows, field='source_sources', fallback_field='source', empty_label='(empty)'):
+    """Count source coverage using multi-source provenance when available."""
+    counts = {}
+    for row in rows:
+        raw_value = (row.get(field, '') or '').strip()
+        raw_parts = [part.strip() for part in raw_value.split(';') if part.strip()]
+        if not raw_parts:
+            fallback = (row.get(fallback_field, '') or '').strip()
+            raw_parts = [fallback] if fallback else []
+        seen = set()
+        for part in raw_parts or [empty_label]:
+            key = part if part else empty_label
+            if key in seen:
+                continue
+            counts[key] = counts.get(key, 0) + 1
+            seen.add(key)
+    return counts
+
+
 def summarize_funnel(raw_rows, verified_rows, scored_rows, reject_rows):
     """Build end-to-end funnel diagnostics for contact quality bottlenecks."""
     funnel = {
@@ -225,8 +244,10 @@ def summarize_funnel(raw_rows, verified_rows, scored_rows, reject_rows):
             'scored': len(scored_rows),
             'rejected': len(reject_rows),
         },
-        'source_mix_raw': value_counts(raw_rows, 'source'),
-        'source_mix_scored': value_counts(scored_rows, 'source'),
+        'source_mix_raw': provenance_counts(raw_rows),
+        'source_mix_scored': provenance_counts(scored_rows),
+        'source_mix_raw_canonical': value_counts(raw_rows, 'source'),
+        'source_mix_scored_canonical': value_counts(scored_rows, 'source'),
         'confidence_mix': value_counts(scored_rows, 'confidence_level'),
         'smtp': {
             'attempted': 0,
@@ -273,23 +294,27 @@ def compute_top_of_funnel_alerts(funnel):
     if source_count <= 1:
         alerts.append('source_diversity_low_single_source')
 
+    attribution_total = sum(int(v or 0) for v in non_empty_sources.values())
+    if attribution_total <= 0:
+        attribution_total = raw_total
+
     top_source = ''
     top_count = 0
     if non_empty_sources:
         top_source, top_count = max(non_empty_sources.items(), key=lambda kv: kv[1])
-        dominance = top_count / raw_total if raw_total > 0 else 0
+        dominance = top_count / attribution_total if attribution_total > 0 else 0.0
         if dominance >= 0.90:
             alerts.append(f'source_dominance_high:{top_source}:{dominance:.2f}')
 
     officer_count = int(non_empty_sources.get('officer_permutation', 0) or 0)
-    if officer_count == raw_total and raw_total > 0:
+    if officer_count == attribution_total and attribution_total > 0:
         alerts.append('officer_permutation_only')
 
     return alerts
 
 
-def evaluate_run_contract(scored_rows, contract):
-    """Evaluate hard run gates using scored contacts."""
+def evaluate_run_contract(scored_rows, contract, mode='strict_verify'):
+    """Evaluate run gates using mode-appropriate eligible contacts."""
     allowed_levels = set(contract.get('count_confidence_levels', ['A', 'B']))
     required_signals = list(contract.get('required_signals', []))
     min_signal_companies = int(contract.get('min_unique_companies_per_signal', 0))
@@ -317,6 +342,10 @@ def evaluate_run_contract(scored_rows, contract):
     provisional_eligible = [r for r in scored_rows if _is_provisional_eligible(r)]
     eligible_contacts = len(strict_eligible)
     unique_companies = { (r.get('company', '') or '').strip().lower() for r in strict_eligible if (r.get('company', '') or '').strip() }
+    provisional_unique_companies = {
+        (r.get('company', '') or '').strip().lower()
+        for r in provisional_eligible if (r.get('company', '') or '').strip()
+    }
 
     signal_company_map = {s: set() for s in required_signals}
     for row in strict_eligible:
@@ -328,14 +357,29 @@ def evaluate_run_contract(scored_rows, contract):
             if sig in tags:
                 signal_company_map[sig].add(company.lower())
 
+    provisional_signal_company_map = {s: set() for s in required_signals}
+    for row in provisional_eligible:
+        company = (row.get('company', '') or '').strip()
+        if not company:
+            continue
+        tags = {t.strip() for t in (row.get('signal_tag', '') or '').split(';') if t.strip()}
+        for sig in required_signals:
+            if sig in tags:
+                provisional_signal_company_map[sig].add(company.lower())
+
+    is_hosted_mode = (mode or 'strict_verify').strip().lower() == 'hosted_discovery'
+    contract_contacts = len(provisional_eligible) if is_hosted_mode else eligible_contacts
+    contract_unique_companies = provisional_unique_companies if is_hosted_mode else unique_companies
+    contract_signal_company_map = provisional_signal_company_map if is_hosted_mode else signal_company_map
+
     deficits = []
-    if eligible_contacts < min_contacts:
-        deficits.append(f"contacts_ab={eligible_contacts} < required={min_contacts}")
-    if len(unique_companies) < min_companies:
-        deficits.append(f"unique_companies={len(unique_companies)} < required={min_companies}")
+    if contract_contacts < min_contacts:
+        deficits.append(f"contacts_ab={contract_contacts} < required={min_contacts}")
+    if len(contract_unique_companies) < min_companies:
+        deficits.append(f"unique_companies={len(contract_unique_companies)} < required={min_companies}")
 
     signal_counts = {}
-    for sig, companies in signal_company_map.items():
+    for sig, companies in contract_signal_company_map.items():
         count = len(companies)
         signal_counts[sig] = count
         if count < min_signal_companies:
@@ -344,12 +388,15 @@ def evaluate_run_contract(scored_rows, contract):
     passed = len(deficits) == 0
     return {
         'passed': passed,
-        'eligible_contacts': eligible_contacts,
+        'eligible_contacts': contract_contacts,
         'strict_eligible_contacts': eligible_contacts,
         'provisional_contacts': len(provisional_eligible),
-        'unique_companies': len(unique_companies),
+        'unique_companies': len(contract_unique_companies),
+        'provisional_unique_companies': len(provisional_unique_companies),
+        'evaluation_mode': 'hosted_discovery' if is_hosted_mode else 'strict_verify',
         'allowed_levels': sorted(allowed_levels),
         'signal_company_counts': signal_counts,
+        'provisional_signal_company_counts': {sig: len(companies) for sig, companies in provisional_signal_company_map.items()},
         'deficits': deficits,
     }
 
@@ -361,6 +408,19 @@ def write_contract_report(path, payload):
             json.dump(payload, f, indent=2, sort_keys=True)
     except Exception as e:
         print(f"  ⚠ Could not write run contract report: {e}")
+
+
+def build_step_metrics(steps):
+    """Serialize step execution metadata for downstream readiness checks."""
+    return [
+        {
+            'number': step.number,
+            'name': step.name,
+            'status': step.status,
+            'duration_seconds': round(float(step.duration or 0.0), 3),
+        }
+        for step in steps
+    ]
 
 
 # ── Main pipeline ──────────────────────────────────────────────────────────────
@@ -390,6 +450,8 @@ Examples:
     parser.add_argument('--collect-state', default='WA',
                         help='Target state for web collection (default: WA)')
     parser.add_argument('--smtp', action='store_true', help='Enable SMTP RCPT verification')
+    parser.add_argument('--verifier-api-url', default='', help='Optional self-hosted verifier API URL')
+    parser.add_argument('--verifier-api-token', default='', help='Optional token for verifier API')
     parser.add_argument('--hunter-key', default='', help='Hunter.io API key')
     parser.add_argument('--skip-theharvester', action='store_true', help='Skip theHarvester')
     parser.add_argument('--skip-dorks', action='store_true', help='Skip DuckDuckGo dork')
@@ -486,15 +548,18 @@ Examples:
         py, os.path.join(SCRIPTS_DIR, 'waterfall_enricher.py'),
         '--input', rebrands, '--output', contacts_raw
     ]
-    if args.skip_theharvester:
+    skip_theharvester = bool(args.skip_theharvester or mode_cfg.get('skip_theharvester', False))
+    skip_dorks = bool(args.skip_dorks or mode_cfg.get('skip_dorks', False))
+
+    if skip_theharvester:
         waterfall_cmd.append('--skip-theharvester')
-    if args.skip_dorks:
+    if skip_dorks:
         waterfall_cmd.append('--skip-dorks')
     if args.hunter_key:
         waterfall_cmd.extend(['--hunter-key', args.hunter_key])
     steps.append(PipelineStep(5, 'Waterfall Contact Enrichment',
         waterfall_cmd,
-        '5-source cascade: theHarvester → team pages → officer permutation → Hunter.io → dorks'))
+        '8-source cascade: theHarvester → team pages → site scan → sitemap → archive → officer permutation → Hunter.io → dorks'))
 
     # Step 6: Email verification
     verify_cmd = [
@@ -503,9 +568,15 @@ Examples:
     ]
     if smtp_enabled:
         verify_cmd.append('--smtp')
+    if args.verifier_api_url:
+        verify_cmd.extend(['--verifier-api-url', args.verifier_api_url])
+    if args.verifier_api_token:
+        verify_cmd.extend(['--verifier-api-token', args.verifier_api_token])
     steps.append(PipelineStep(6, 'Email Verification',
         verify_cmd,
-        'MX + domain age' + (' + SMTP RCPT + catch-all' if smtp_enabled else '')))
+        'MX + domain age'
+        + (' + SMTP RCPT + catch-all' if smtp_enabled else '')
+        + (' + verifier API' if args.verifier_api_url else '')))
 
     # Step 7: Freshness scoring
     steps.append(PipelineStep(7, 'Freshness Scoring',
@@ -713,7 +784,7 @@ Examples:
     contract_eval = {}
     if contract_enabled:
         scored_rows = load_csv_rows(contacts_scored)
-        contract_eval = evaluate_run_contract(scored_rows, contract)
+        contract_eval = evaluate_run_contract(scored_rows, contract, mode=args.mode)
         contract_failed = not contract_eval.get('passed', False)
 
         print("\n  🧭 Run contract evaluation:")
@@ -741,6 +812,8 @@ Examples:
                 'generated_at': datetime.now().isoformat(),
                 'input': sos,
                 'output_dir': out_dir,
+                'pipeline_duration_seconds': round(pipeline_duration, 3),
+                'step_metrics': build_step_metrics(steps),
                 'contract': contract,
                 'input_profile': input_profile,
                 'signal_diagnostics': {
@@ -762,6 +835,8 @@ Examples:
             'generated_at': datetime.now().isoformat(),
             'input': sos,
             'output_dir': out_dir,
+            'pipeline_duration_seconds': round(pipeline_duration, 3),
+            'step_metrics': build_step_metrics(steps),
             'pipeline_failed': failed,
             'contract_enabled': contract_enabled,
             'contract_failed': contract_failed,

@@ -160,6 +160,22 @@ def compute_freshness_score(row: dict) -> dict:
         sig_score = max(signal_freshness_score(s, signal_date) for s in signals) if signals else 0.0
     else:
         sig_score = 0.0
+
+    # Component 5: Source consensus bonus (cross-source corroboration).
+    try:
+        source_count = int(str(row.get('source_count', '') or '0').strip() or 0)
+    except ValueError:
+        source_count = 0
+    if source_count <= 0:
+        source_sources = str(row.get('source_sources', '') or '').strip()
+        if source_sources:
+            source_count = len([s for s in source_sources.split(';') if s.strip()])
+    if source_count >= 3:
+        consensus_bonus = 0.12
+    elif source_count == 2:
+        consensus_bonus = 0.08
+    else:
+        consensus_bonus = 0.0
     
     # Weighted composite — equal weights since all matter for Trillium's use case
     composite = (
@@ -168,10 +184,16 @@ def compute_freshness_score(row: dict) -> dict:
         0.25 * freshness +
         0.25 * sig_score
     )
+
+    composite = min(1.0, composite + consensus_bonus)
     
     # Bonus: if record has a signal AND MX passes, bump score (these are the leads we want)
     if sig_score > 0 and mx_pass:
         composite = min(1.0, composite + 0.15)
+
+    # Penalize single-source guessed contacts unless SMTP explicitly accepted.
+    if source == 'officer_permutation' and source_count <= 1 and not (smtp_value == 'ACCEPT' and catch_all_value == 'FALSE'):
+        composite = max(0.0, composite - 0.10)
     
     composite = round(composite, 3)
     
@@ -201,6 +223,7 @@ def compute_freshness_score(row: dict) -> dict:
     # Build breakdown
     breakdown = (
         f"src={src_score:.2f}({source or 'unknown'}) "
+        f"multi={source_count} "
         f"ver={v_score:.2f}(mx={'✓' if mx_pass else '✗'}) "
         f"fresh={freshness:.2f}({int(collection_age)}d) "
         f"sig={sig_score:.2f}({signal_tag or 'none'})"

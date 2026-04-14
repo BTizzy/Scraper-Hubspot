@@ -9,8 +9,8 @@ What this script adds:
   4) Persistent state files under --state-dir
 
 Usage:
-  python daily_run.py --sos sos_export.csv
-  python daily_run.py --sos sos_export.csv --smtp --min-level B
+    python daily_run.py --sos sos_export.csv --mode hosted_discovery
+    python daily_run.py --sos sos_export.csv --mode strict_verify --smtp --min-level B
   python daily_run.py --collect-from-web --days 90 --min-level C
 """
 
@@ -145,7 +145,11 @@ def main() -> int:
     parser.add_argument('--output-root', default='daily_output', help='Root folder for date-stamped pipeline outputs')
     parser.add_argument('--run-name', default='', help='Optional suffix for output folder name')
     parser.add_argument('--min-level', default='C', choices=['A', 'B', 'C', 'D'])
+    parser.add_argument('--mode', choices=['strict_verify', 'hosted_discovery'], default='hosted_discovery',
+                        help='hosted_discovery is the free GitHub default; strict_verify is optional/internal')
     parser.add_argument('--smtp', action='store_true', help='Pass --smtp through to run_pipeline.py')
+    parser.add_argument('--verifier-api-url', default='', help='Pass through self-hosted verifier API URL')
+    parser.add_argument('--verifier-api-token', default='', help='Pass through token for verifier API')
     parser.add_argument('--hunter-key', default='', help='Pass through Hunter API key')
     parser.add_argument('--skip-theharvester', action='store_true')
     parser.add_argument('--skip-dorks', action='store_true')
@@ -153,6 +157,9 @@ def main() -> int:
     parser.add_argument('--hubspot-push', action='store_true',
                         help='Push hubspot_import.csv to HubSpot API (requires HUBSPOT_API_KEY)')
     args = parser.parse_args()
+
+    if args.mode == 'strict_verify' and not args.smtp:
+        parser.error('--smtp is required when --mode strict_verify is used')
 
     scripts_dir = Path(__file__).resolve().parent
     state_dir = (scripts_dir / args.state_dir).resolve()
@@ -212,9 +219,14 @@ def main() -> int:
             '--sos', str(filtered_input),
             '--output-dir', str(out_dir),
             '--min-level', args.min_level,
+            '--mode', args.mode,
         ]
         if args.smtp:
             cmd.append('--smtp')
+        if args.verifier_api_url:
+            cmd.extend(['--verifier-api-url', args.verifier_api_url])
+        if args.verifier_api_token:
+            cmd.extend(['--verifier-api-token', args.verifier_api_token])
         if args.hunter_key:
             cmd.extend(['--hunter-key', args.hunter_key])
         if args.skip_theharvester:

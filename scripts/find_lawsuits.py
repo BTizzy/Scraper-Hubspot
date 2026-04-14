@@ -15,6 +15,7 @@ import csv
 import os
 import re
 import requests
+import xml.etree.ElementTree as ET
 from datetime import UTC, datetime, timedelta
 import time
 import urllib.parse
@@ -32,6 +33,7 @@ CL_SEARCH = 'https://www.courtlistener.com/api/rest/v4/search/'
 
 # ── DuckDuckGo fallback ───────────────────────────────────────────────────────
 DDG_HTML = 'https://html.duckduckgo.com/html/'
+GOOGLE_NEWS_RSS = 'https://news.google.com/rss/search'
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
 
 # Lawsuit-related terms for snippet evidence scoring
@@ -42,6 +44,92 @@ LAWSUIT_EVIDENCE_TERMS = re.compile(
 )
 
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
+
+
+def ddg_lawsuit_fallback_enabled():
+    """Allow opt-in DDG fallback for lawsuits when explicitly enabled."""
+    return os.environ.get('ENABLE_DDG_LAWSUIT_FALLBACK', '').strip().lower() in {'1', 'true', 'yes'}
+
+
+def parse_google_news_rss(xml_text):
+    """Parse Google News RSS into simple title/link/snippet dicts."""
+    if not xml_text or '<rss' not in xml_text.lower():
+        return []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+
+    items = []
+    for item in root.findall('./channel/item'):
+        title = (item.findtext('title') or '').strip()
+        link = (item.findtext('link') or '').strip()
+        description = (item.findtext('description') or '').strip()
+        pub_date = (item.findtext('pubDate') or '').strip()
+        if title or description:
+            snippet = BeautifulSoup(description, 'html.parser').get_text(' ', strip=True)
+            items.append({
+                'title': title,
+                'link': link,
+                'snippet': snippet,
+                'pub_date': pub_date,
+            })
+    return items
+
+
+def query_google_news_lawsuits(name):
+    """Hosted-friendly fallback using Google News RSS search for lawsuit evidence."""
+    query = f'"{name}" lawsuit OR sued OR complaint OR litigation'
+    try:
+        r, req_error = get_with_retry(
+            GOOGLE_NEWS_RSS,
+            params={'q': query, 'hl': 'en-US', 'gl': 'US', 'ceid': 'US:en'},
+            headers=HEADERS,
+            timeout=10,
+            retries=1,
+            backoff_seconds=0.5,
+        )
+        if r is None:
+            return {
+                'results': [],
+                'status': 'news_request_error',
+                'http_status': '',
+                'error': req_error or 'news request failed after retries',
+            }
+        if r.status_code >= 400:
+            return {
+                'results': [],
+                'status': 'news_http_error',
+                'http_status': r.status_code,
+                'error': f'news HTTP {r.status_code}',
+            }
+
+        items = []
+        for item in parse_google_news_rss(r.text):
+            evidence_blob = ' '.join([item.get('title', ''), item.get('snippet', '')])
+            if LAWSUIT_EVIDENCE_TERMS.search(evidence_blob):
+                items.append({
+                    'case_name': item.get('title', ''),
+                    'absolute_url': item.get('link', ''),
+                    'date_filed': item.get('pub_date', ''),
+                    'docket_number': '',
+                    'court_id': 'google_news',
+                })
+            if len(items) >= 5:
+                break
+        return {
+            'results': items,
+            'status': 'ok_google_news' if items else 'news_no_match',
+            'http_status': r.status_code,
+            'error': '',
+        }
+    except Exception as exc:
+        return {
+            'results': [],
+            'status': 'news_unknown_error',
+            'http_status': '',
+            'error': str(exc),
+        }
 
 
 def get_with_retry(url, *, params=None, headers=None, timeout=12, retries=2, backoff_seconds=0.8):
@@ -294,7 +382,19 @@ def query_courtlistener(name, since_date):
         return result
     tier1_status = result['status']
 
-    # Tier 2: DuckDuckGo dork fallback
+    # Tier 2: Hosted-friendly news search fallback
+    news_result = query_google_news_lawsuits(name)
+    if news_result['results']:
+        news_result['error'] = f'v4={tier1_status}; used google news fallback'
+        return news_result
+    if news_result['status'] == 'news_no_match' and not ddg_lawsuit_fallback_enabled():
+        return news_result
+    if news_result['status'] not in ('news_no_match',):
+        news_result['error'] = f'v4={tier1_status}; news={news_result["status"]}: {news_result["error"]}'
+    else:
+        news_result['error'] = f'v4={tier1_status}; google news found no matches'
+
+    # Tier 3: DuckDuckGo dork fallback
     if tier1_status in ('no_api_key', 'auth_blocked', 'rate_limited'):
         ddg_result = query_duckduckgo_lawsuits(name)
         if ddg_result['results']:
@@ -302,11 +402,11 @@ def query_courtlistener(name, since_date):
             return ddg_result
         # Preserve the DDG status but note the fallback was tried
         if ddg_result['status'] in ('ok_no_match',):
-            ddg_result['error'] = f'v4={tier1_status}; DDG found no matches'
+            ddg_result['error'] = f'v4={tier1_status}; news={news_result["status"]}; DDG found no matches'
             ddg_result['status'] = 'ok_no_match'
             return ddg_result
         # DDG also failed — return the richer error
-        ddg_result['error'] = f'v4={tier1_status}; DDG={ddg_result["status"]}: {ddg_result["error"]}'
+        ddg_result['error'] = f'v4={tier1_status}; news={news_result["status"]}; DDG={ddg_result["status"]}: {ddg_result["error"]}'
         ddg_result['status'] = 'both_failed'
         return ddg_result
 
@@ -314,10 +414,11 @@ def query_courtlistener(name, since_date):
     ddg_result = query_duckduckgo_lawsuits(name)
     if ddg_result['results']:
         ddg_result['status'] = 'ok_ddg_fallback'
-        ddg_result['error'] = f'v4={tier1_status}; fell back to DDG'
+        ddg_result['error'] = f'v4={tier1_status}; news={news_result["status"]}; fell back to DDG'
         return ddg_result
 
-    # Both failed
+    if news_result['status'] == 'news_no_match':
+        return news_result
     return result
 
 def find(input_csv, output_csv):

@@ -11,12 +11,14 @@ import argparse
 import csv
 import re
 import requests
+import xml.etree.ElementTree as ET
 from urllib.parse import urlparse, quote_plus
 import time
 
 from bs4 import BeautifulSoup
 
 OPENCORP_SEARCH = "https://api.opencorporates.com/v0.4/companies/search?q={q}&jurisdiction_code=us_wa"
+GOOGLE_NEWS_RSS = 'https://news.google.com/rss/search'
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
 
@@ -29,6 +31,59 @@ KEYWORDS = [
 ALIAS_COLUMN_PATTERN = re.compile(r'(previous|former|old|alternate|trade|dba).*(name)?', re.IGNORECASE)
 LEGAL_SUFFIX_PATTERN = re.compile(r'\b(llc|inc|corp|corporation|co|company|ltd|limited|pllc|lp|llp|group|services|holdings)\b', re.IGNORECASE)
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
+
+
+def parse_google_news_rss(xml_text):
+    """Parse Google News RSS into simple title/link/snippet dicts."""
+    if not xml_text or '<rss' not in xml_text.lower():
+        return []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return []
+
+    items = []
+    for item in root.findall('./channel/item'):
+        title = (item.findtext('title') or '').strip()
+        link = (item.findtext('link') or '').strip()
+        description = (item.findtext('description') or '').strip()
+        pub_date = (item.findtext('pubDate') or '').strip()
+        if title or description:
+            snippet = BeautifulSoup(description, 'html.parser').get_text(' ', strip=True)
+            items.append({'title': title, 'link': link, 'snippet': snippet, 'pub_date': pub_date})
+    return items
+
+
+def query_google_news_business_change(name):
+    """Hosted-friendly fallback using Google News RSS for business-change evidence."""
+    query = f'"{name}" (acquired OR sold OR rebrand OR "under new management" OR dba OR "new ownership")'
+    try:
+        r, req_error = get_with_retry(
+            GOOGLE_NEWS_RSS + '?q=' + quote_plus(query) + '&hl=en-US&gl=US&ceid=US:en',
+            timeout=10,
+            retries=1,
+            backoff_seconds=0.5,
+            headers=HEADERS,
+        )
+        if r is None:
+            return {'found': None, 'snippet': '', 'status': 'news_request_error', 'http_status': '', 'error': req_error or 'news request failed'}
+        if r.status_code >= 400:
+            return {'found': None, 'snippet': '', 'status': 'news_http_error', 'http_status': r.status_code, 'error': f'news HTTP {r.status_code}'}
+
+        for item in parse_google_news_rss(r.text):
+            evidence_blob = ' '.join([item.get('title', ''), item.get('snippet', '')]).lower()
+            for keyword in KEYWORDS:
+                if keyword in evidence_blob:
+                    return {
+                        'found': True,
+                        'snippet': f"{item.get('link', '')} | {item.get('title', '')}",
+                        'status': 'news_match',
+                        'http_status': r.status_code,
+                        'error': '',
+                    }
+        return {'found': False, 'snippet': '', 'status': 'news_no_match', 'http_status': r.status_code, 'error': ''}
+    except Exception as exc:
+        return {'found': None, 'snippet': '', 'status': 'news_unknown_error', 'http_status': '', 'error': str(exc)}
 
 
 def get_with_retry(url, *, headers=None, timeout=10, retries=2, backoff_seconds=0.8):
@@ -493,6 +548,15 @@ def find(input_csv, output_csv):
                 else:
                     reason = 'website copy'
                 sample = (sample + ' || ' + snippet) if sample else snippet
+            elif rebrand_flag != 'TRUE':
+                news_result = query_google_news_business_change(name)
+                if news_result.get('found'):
+                    rebrand_flag = 'TRUE'
+                    reason = 'news coverage'
+                    sample = news_result.get('snippet', '')
+                    query_status = news_result.get('status', query_status)
+                elif news_result.get('status') not in ('news_no_match',):
+                    row_errors.append(f"news:{news_result.get('status')}:{news_result.get('error', '')}")
 
             row['rebrand_flag'] = rebrand_flag
             row['rebrand_reason'] = reason

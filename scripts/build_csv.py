@@ -18,6 +18,8 @@ This version aligns column names with the upstream pipeline:
 import csv
 import argparse
 
+from trillium_config import get_quality_floodgates
+
 HUBSPOT_HEADERS = ['Email', 'First Name', 'Last Name', 'Company', 'Job Title',
                    'Phone', 'Website', 'City', 'Signal Tag', 'Confidence Level',
                    'LinkedIn URL', 'Notes']
@@ -77,6 +79,17 @@ def passes_quality(row, mode='strict_verify'):
     smtp_status = (row.get('smtp_status') or '').lower().strip()
     catch_all = (row.get('catch_all') or '').upper()
     smtp_accept = smtp_ok in ('ACCEPT', 'TRUE')
+    source_sources = (row.get('source_sources') or '').strip()
+    try:
+        source_count = int(str(row.get('source_count') or '').strip() or 0)
+    except ValueError:
+        source_count = 0
+    if source_count <= 0 and source_sources:
+        source_count = len([s for s in source_sources.split(';') if s.strip()])
+
+    floodgates = get_quality_floodgates()
+    min_provisional_sources = int(floodgates.get('hosted_min_source_count_for_provisional_officer', 2))
+    consensus_gate = bool(floodgates.get('enable_source_consensus_gate', True))
 
     if not email:
         return False, 'Missing email'
@@ -91,6 +104,9 @@ def passes_quality(row, mode='strict_verify'):
     # Ryan can filter by Confidence Level column in HubSpot.
     if confidence not in ('A', 'B'):
         return False, f'Low confidence ({confidence or "unknown"})'
+    # strict_verify means mailbox-valid output for every exported row.
+    if mode == 'strict_verify' and (not smtp_accept or catch_all == 'TRUE'):
+        return False, 'Strict verify requires SMTP acceptance on a non-catch-all mailbox'
     # Officer permutation emails are guessed patterns.
     # strict_verify mode requires SMTP acceptance on non-catch-all domains.
     # hosted_discovery mode allows transport-level unknowns as provisional output.
@@ -100,6 +116,8 @@ def passes_quality(row, mode='strict_verify'):
         if smtp_ok == 'REJECT':
             return False, 'Officer permutation mailbox rejected'
         if mode == 'hosted_discovery' and smtp_status in ('transport_blocked', 'mx_lookup_failed') and confidence in ('A', 'B'):
+            if consensus_gate and source_count < min_provisional_sources:
+                return False, f'Low source consensus ({source_count}) for provisional officer permutation'
             return True, ''
         return False, 'Officer permutation without SMTP acceptance'
     return True, ''

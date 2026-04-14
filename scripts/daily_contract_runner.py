@@ -1,13 +1,18 @@
 """daily_contract_runner.py
 
 Quota-driven daily runner that accumulates contacts across multiple pipeline batches
-until production contract targets are met using real active emails.
+until production contract targets are met.
 
-Real active email criteria:
-  - confidence_level in A/B
-  - smtp_ok in {ACCEPT, TRUE}
-  - catch_all == FALSE
-  - mx_pass == TRUE
+Strict email criteria:
+    - confidence_level in A/B
+    - smtp_ok in {ACCEPT, TRUE}
+    - catch_all == FALSE
+    - mx_pass == TRUE
+
+Hosted quality criteria:
+    - confidence_level in the configured contract levels (default A/B/C)
+    - no explicit SMTP rejection
+    - MX pass plus hosted-safe provisional verification state
 
 This avoids one-shot runs that cannot satisfy daily SLO targets.
 """
@@ -17,7 +22,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import os
 import subprocess
 import sys
@@ -25,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from hosted_readiness import compute_readiness
 from trillium_config import get_daily_run_contract
 
 HUBSPOT_HEADERS = [
@@ -138,6 +143,17 @@ def is_provisional_active_email(row: dict) -> bool:
     return mx_pass == "TRUE" and smtp_status in ("transport_blocked", "mx_lookup_failed", "not_attempted", "")
 
 
+def is_hosted_quality_email(row: dict, allowed_levels: set[str]) -> bool:
+    """Hosted-only production proxy for a shippable free-tier lead."""
+    confidence = (row.get("confidence_level") or "").strip().upper()
+    if confidence not in allowed_levels:
+        return False
+    smtp_ok = (row.get("smtp_ok") or "").strip().upper()
+    if smtp_ok in ("REJECT", "FALSE"):
+        return False
+    return is_provisional_active_email(row)
+
+
 def evaluate_contract(rows: list[dict], contract: dict) -> dict:
     required_signals = list(contract.get("required_signals", []))
     min_signal_companies = int(contract.get("min_unique_companies_per_signal", 0))
@@ -179,6 +195,24 @@ def evaluate_contract(rows: list[dict], contract: dict) -> dict:
     }
 
 
+def build_hosted_readiness_artifacts(out_dir: Path) -> dict:
+    """Compute hosted readiness report from pipeline artifacts in a run folder."""
+    contract_path = out_dir / "run_contract_report.json"
+    daily_kpi_path = out_dir / "daily_kpi_report.json"
+    if not contract_path.exists() or not daily_kpi_path.exists():
+        return {}
+
+    with contract_path.open(encoding="utf-8") as f:
+        contract_report = json.load(f)
+    with daily_kpi_path.open(encoding="utf-8") as f:
+        daily_kpi_report = json.load(f)
+
+    readiness = compute_readiness(contract_report, daily_kpi_report)
+    with (out_dir / "hosted_readiness_report.json").open("w", encoding="utf-8") as f:
+        json.dump(readiness, f, indent=2, sort_keys=True)
+    return readiness
+
+
 def to_hubspot_rows(rows: list[dict]) -> list[dict]:
     out = []
     for row in rows:
@@ -209,7 +243,7 @@ def chunk_rows(rows: list[dict], size: int) -> list[list[dict]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Contract-driven daily runner for real active emails")
+    parser = argparse.ArgumentParser(description="Contract-driven daily runner for hosted-only or strict qualified emails")
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--sos", help="Input SOS CSV")
     input_group.add_argument("--input-pool", help="Pre-built normalized input pool CSV")
@@ -218,10 +252,12 @@ def main() -> int:
     parser.add_argument("--run-name", default="", help="Optional run name suffix")
     parser.add_argument("--batch-size", type=int, default=40, help="Companies per pipeline batch")
     parser.add_argument("--max-batches", type=int, default=20, help="Maximum batch runs in one day")
-    parser.add_argument("--target-active-emails", type=int, default=0, help="Override min real active emails target")
+    parser.add_argument("--target-active-emails", type=int, default=0, help="Override min daily qualified-email target")
     parser.add_argument("--smtp", action="store_true", help="Enable SMTP probe (required for real active emails)")
-    parser.add_argument("--mode", choices=["strict_verify", "hosted_discovery"], default="strict_verify",
-                        help="strict_verify requires SMTP acceptance; hosted_discovery reports provisional metrics")
+    parser.add_argument("--verifier-api-url", default="", help="Optional self-hosted verifier API URL")
+    parser.add_argument("--verifier-api-token", default="", help="Optional token for verifier API")
+    parser.add_argument("--mode", choices=["strict_verify", "hosted_discovery"], default="hosted_discovery",
+                        help="hosted_discovery is the free GitHub production path; strict_verify is optional/internal")
     parser.add_argument("--hunter-key", default="", help="Hunter API key")
     parser.add_argument("--skip-theharvester", action="store_true")
     parser.add_argument("--skip-dorks", action="store_true")
@@ -271,7 +307,7 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Novel company candidates: {len(candidate_rows)}")
-    print(f"Contract target: {contract.get('min_contacts_per_run')} real active emails")
+    print(f"Contract target: {contract.get('min_contacts_per_run')} qualified emails ({args.mode})")
 
     batches = chunk_rows(candidate_rows, max(1, args.batch_size))[: max(1, args.max_batches)]
     all_scored: list[dict] = []
@@ -296,6 +332,10 @@ def main() -> int:
             ]
             if args.smtp:
                 cmd.append("--smtp")
+            if args.verifier_api_url:
+                cmd.extend(["--verifier-api-url", args.verifier_api_url])
+            if args.verifier_api_token:
+                cmd.extend(["--verifier-api-token", args.verifier_api_token])
             if args.hunter_key:
                 cmd.extend(["--hunter-key", args.hunter_key])
             if args.skip_theharvester:
@@ -316,17 +356,22 @@ def main() -> int:
             if key:
                 used_company_keys.add(key)
 
-        # Evaluate rolling progress on real active contacts not seen before.
+        # Evaluate rolling progress using mode-appropriate qualified contacts.
         dedup_scored = unique_by_email(all_scored)
         active = [r for r in dedup_scored if is_real_active_email(r)]
         provisional = [r for r in dedup_scored if is_provisional_active_email(r)]
+        allowed_levels = set(contract.get("count_confidence_levels", ["A", "B", "C"]))
+        hosted_quality = [r for r in dedup_scored if is_hosted_quality_email(r, allowed_levels)]
         active_novel = [r for r in active if (r.get("email") or "").strip().lower() not in seen_emails]
-        contract_eval = evaluate_contract(active_novel, contract)
+        hosted_novel = [r for r in hosted_quality if (r.get("email") or "").strip().lower() not in seen_emails]
+        contract_basis = active_novel if args.mode == "strict_verify" else hosted_novel
+        contract_eval = evaluate_contract(contract_basis, contract)
         contract_eval["provisional_contacts"] = len(provisional)
+        contract_eval["hosted_quality_contacts"] = len(hosted_novel)
 
         print(
             "Progress: "
-            f"active={contract_eval['eligible_contacts']} "
+            f"qualified={contract_eval['eligible_contacts']} "
             f"provisional={contract_eval['provisional_contacts']} "
             f"companies={contract_eval['unique_companies']} "
             f"signals={contract_eval['signal_company_counts']}"
@@ -339,9 +384,14 @@ def main() -> int:
     dedup_scored = unique_by_email(all_scored)
     active = [r for r in dedup_scored if is_real_active_email(r)]
     provisional = [r for r in dedup_scored if is_provisional_active_email(r)]
+    allowed_levels = set(contract.get("count_confidence_levels", ["A", "B", "C"]))
+    hosted_quality = [r for r in dedup_scored if is_hosted_quality_email(r, allowed_levels)]
     active_novel = [r for r in active if (r.get("email") or "").strip().lower() not in seen_emails]
-    contract_eval = evaluate_contract(active_novel, contract)
+    hosted_novel = [r for r in hosted_quality if (r.get("email") or "").strip().lower() not in seen_emails]
+    contract_basis = active_novel if args.mode == "strict_verify" else hosted_novel
+    contract_eval = evaluate_contract(contract_basis, contract)
     contract_eval["provisional_contacts"] = len(provisional)
+    contract_eval["hosted_quality_contacts"] = len(hosted_novel)
 
     # Persist consolidated outputs
     if dedup_scored:
@@ -353,16 +403,18 @@ def main() -> int:
             [],
         )
 
-    if active_novel:
-        write_csv_rows(out_dir / "real_active_emails.csv", list(active_novel[0].keys()), active_novel)
+    export_rows = active_novel if args.mode == "strict_verify" else hosted_novel
+    export_name = "real_active_emails.csv" if args.mode == "strict_verify" else "hosted_quality_emails.csv"
+    if export_rows:
+        write_csv_rows(out_dir / export_name, list(export_rows[0].keys()), export_rows)
     else:
         write_csv_rows(
-            out_dir / "real_active_emails.csv",
+            out_dir / export_name,
             ["email", "company", "source", "confidence_level", "smtp_ok", "catch_all", "signal_tag"],
             [],
         )
 
-    hs_rows = to_hubspot_rows(active_novel)
+    hs_rows = to_hubspot_rows(export_rows)
     write_csv_rows(out_dir / "hubspot_import.csv", HUBSPOT_HEADERS, hs_rows)
 
     summary = {
@@ -374,27 +426,37 @@ def main() -> int:
         "batches_attempted": len(batches),
         "candidate_companies": len(candidate_rows),
         "used_companies": len(used_company_keys),
+        "qualified_contacts": len(contract_basis),
         "real_active_contacts": len(active_novel),
+        "hosted_quality_contacts": len(hosted_novel),
         "provisional_contacts": len(provisional),
         "contract": contract,
         "evaluation": contract_eval,
+        "mode": args.mode,
     }
     with (out_dir / "daily_contract_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, sort_keys=True)
+
+    readiness = build_hosted_readiness_artifacts(out_dir) if args.mode == "hosted_discovery" else {}
 
     should_update_state = contract_eval["passed"] or args.update_state_on_failure
     if should_update_state:
         append_seen_companies(seen_companies_path, used_company_keys)
         append_seen_emails(
             seen_emails_path,
-            {(r.get("email") or "").strip().lower() for r in active_novel if (r.get("email") or "").strip()},
+            {(r.get("email") or "").strip().lower() for r in contract_basis if (r.get("email") or "").strip()},
         )
 
     print("\nDaily contract runner complete:")
     print(f"  output_dir={out_dir}")
+    print(f"  qualified_contacts={len(contract_basis)}")
     print(f"  real_active_contacts={len(active_novel)}")
+    print(f"  hosted_quality_contacts={len(hosted_novel)}")
     print(f"  provisional_contacts={len(provisional)}")
     print(f"  contract_passed={contract_eval['passed']}")
+    if readiness:
+        print(f"  hosted_ready={readiness.get('ready')}")
+        print(f"  projected_weekly_quality_leads={readiness.get('metrics', {}).get('projected_weekly_quality_leads', 0)}")
     if contract_eval["deficits"]:
         print("  deficits:")
         for d in contract_eval["deficits"]:
