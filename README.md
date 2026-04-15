@@ -2,7 +2,7 @@
 
 Lead generation and enrichment pipeline for Trillium Hiring.
 
-This repository is not an ATS comparison tool. It is a multi-step data pipeline that takes WA SOS company exports, enriches company/contact data, scores lead quality, and builds HubSpot-ready CSV imports.
+It is a multi-step data pipeline that takes WA SOS company exports, enriches company/contact data, scores lead quality, and builds HubSpot-ready CSV imports.
 
 ## What This Project Does
 
