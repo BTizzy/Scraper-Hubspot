@@ -96,6 +96,11 @@ def estimate(input_csv, output_csv):
             row['headcount_estimate'] = estimate
             row['headcount_method'] = method
             row['headcount_pass'] = passed
+
+            existing_signals = [s.strip() for s in (row.get('signal_tag', '') or '').split(';') if s.strip()]
+            if passed == 'TRUE' and 'new_business' in existing_signals and 'formation_with_employees' not in existing_signals:
+                existing_signals.append('formation_with_employees')
+            row['signal_tag'] = ';'.join(existing_signals)
             writer.writerow(row)
 
 def main():

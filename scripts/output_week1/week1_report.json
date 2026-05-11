@@ -1,0 +1,105 @@
+{
+  "generated_at": "2026-03-10T18:00:57.610597",
+  "input": "/workspaces/Scraper-Hubspot/scripts/output_phase1_impl_fix/companies_refresh.csv",
+  "days": [
+    {
+      "day": 1,
+      "raw_contacts": 30,
+      "smtp_attempted": 30,
+      "smtp_accepted": 0,
+      "confidence_a": 0,
+      "confidence_b": 0,
+      "hubspot_rows": 0,
+      "source_mix_top3": {
+        "officer_permutation": 30
+      },
+      "top_reject_reason": ""
+    },
+    {
+      "day": 2,
+      "raw_contacts": 30,
+      "smtp_attempted": 30,
+      "smtp_accepted": 0,
+      "confidence_a": 0,
+      "confidence_b": 0,
+      "hubspot_rows": 0,
+      "source_mix_top3": {
+        "officer_permutation": 30
+      },
+      "top_reject_reason": ""
+    },
+    {
+      "day": 3,
+      "raw_contacts": 30,
+      "smtp_attempted": 30,
+      "smtp_accepted": 0,
+      "confidence_a": 0,
+      "confidence_b": 0,
+      "hubspot_rows": 0,
+      "source_mix_top3": {
+        "officer_permutation": 30
+      },
+      "top_reject_reason": ""
+    },
+    {
+      "day": 4,
+      "raw_contacts": 30,
+      "smtp_attempted": 30,
+      "smtp_accepted": 0,
+      "confidence_a": 0,
+      "confidence_b": 0,
+      "hubspot_rows": 0,
+      "source_mix_top3": {
+        "officer_permutation": 30
+      },
+      "top_reject_reason": ""
+    },
+    {
+      "day": 5,
+      "raw_contacts": 30,
+      "smtp_attempted": 30,
+      "smtp_accepted": 0,
+      "confidence_a": 0,
+      "confidence_b": 0,
+      "hubspot_rows": 0,
+      "source_mix_top3": {
+        "officer_permutation": 30
+      },
+      "top_reject_reason": ""
+    },
+    {
+      "day": 6,
+      "raw_contacts": 30,
+      "smtp_attempted": 30,
+      "smtp_accepted": 0,
+      "confidence_a": 0,
+      "confidence_b": 0,
+      "hubspot_rows": 0,
+      "source_mix_top3": {
+        "officer_permutation": 30
+      },
+      "top_reject_reason": ""
+    },
+    {
+      "day": 7,
+      "raw_contacts": 30,
+      "smtp_attempted": 30,
+      "smtp_accepted": 0,
+      "confidence_a": 0,
+      "confidence_b": 0,
+      "hubspot_rows": 0,
+      "source_mix_top3": {
+        "officer_permutation": 30
+      },
+      "top_reject_reason": ""
+    }
+  ],
+  "totals": {
+    "raw_contacts": 210,
+    "smtp_attempted": 210,
+    "smtp_accepted": 0,
+    "confidence_a": 0,
+    "confidence_b": 0,
+    "hubspot_rows": 0
+  }
+}

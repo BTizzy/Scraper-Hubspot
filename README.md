@@ -1,74 +1,173 @@
-# Enterprise ATS Comparison Tool
+# Scraper-Hubspot
 
-A comprehensive comparison analysis of Greenhouse vs SmartRecruiters for enterprise recruiting needs.
+Lead generation and enrichment pipeline for Trillium Hiring.
 
-## Overview
+It is a multi-step data pipeline that takes WA SOS company exports, enriches company/contact data, scores lead quality, and builds HubSpot-ready CSV imports.
 
-This tool provides a detailed, side-by-side comparison of two leading Applicant Tracking Systems (ATS) designed for enterprise recruitment operations. The analysis focuses on compliance reporting, ATS functionality, and integration capabilities.
+## What This Project Does
 
-## Key Features
+- Enriches company records from public sources.
+- Detects buying signals (new formation, lawsuits, rebrand indicators).
+- Discovers contacts using a waterfall approach.
+- Verifies emails (MX, optional SMTP checks).
+- Scores records into confidence levels (`A`/`B`/`C`/`D`).
+- Outputs HubSpot import CSV plus rejects.
 
-- **Comprehensive Comparison Table**: Direct feature-by-feature comparison
-- **Compliance Reporting Analysis**: EEO, OFCCP, DEI capabilities
-- **Integration Ecosystem**: SAP and third-party integration assessment
-- **Enterprise Context**: Tailored for global manufacturing operations
-- **Data Migration Considerations**: Risk analysis and implementation timelines
-- **Actionable Recommendations**: Clear guidance based on specific business needs
+Primary implementation is in `scripts/`.
 
-## Analysis Highlights
-
-### Greenhouse Advantages
-- Industry-leading compliance and DEI reporting
-- 500+ pre-built integrations
-- Structured hiring methodology
-- Lower implementation risk (fix vs. replace)
-- Proven track record in enterprise environments
-
-### SmartRecruiters Advantages  
-- Native SAP SuccessFactors integration
-- Winston AI for candidate matching
-- 35 language support for global operations
-- Modern UI with workflow automation
-
-## Viewing the Comparison
-
-To view the HTML comparison:
-1. Download or clone this repository
-2. Open `index.html` in your web browser
-3. Navigate using the sidebar menu
-
-## Repository Structure
+## Repository Layout
 
 ```
-ats-comparison-tool/
-├── index.html          # Main comparison page
-└── README.md           # This file
+Scraper-Hubspot/
+├── README.md
+└── scripts/
+		├── run_pipeline.py
+		├── collect_companies.py
+		├── estimate_headcount.py
+		├── find_lawsuits.py
+		├── find_rebrands.py
+		├── waterfall_enricher.py
+		├── verify_emails.py
+		├── freshness_scorer.py
+		├── build_csv.py
+		├── trillium_config.py
+		├── test_pipeline.py
+		└── test_data/
 ```
 
-## Technical Stack
+For script-level usage details, see `scripts/README.md`.
 
-- Pure HTML5, CSS3, and vanilla JavaScript
-- Responsive design for desktop and mobile
-- Dark theme optimized for readability
-- No external dependencies
+## State Model (End-to-End)
 
-## Use Case
+The pipeline is stateful by file stage. Each step produces a CSV consumed by the next step.
 
-This comparison was created for a global electric vehicle manufacturing company (~6,800 employees) evaluating their ATS strategy. The company currently uses Greenhouse but is considering SmartRecruiters due to SAP ecosystem alignment.
+1. `sos_input`
+- File: WA SOS input CSV (`--sos`)
+- Required key field: `company_name`
 
-**Key Conclusion**: Optimize existing Greenhouse implementation rather than migrate to SmartRecruiters to avoid data migration risks and maintain compliance capabilities.
+2. `companies_enriched`
+- File: `companies_enriched.csv`
+- Produced by: `collect_companies.py`
+- Adds fields including:
+	`website`, `domain`, `officers`, `opencorp_url`, `company_number`,
+	`jurisdiction_code`, `current_status`, `registered_address`, `signal_tag`, `collected_date`
 
-## Sharing
+3. `companies_sized`
+- File: `companies_sized.csv`
+- Produced by: `estimate_headcount.py`
+- Adds:
+	`headcount_estimate`, `headcount_method`, `headcount_pass`
 
-Since this is a private repository, share access by:
-1. Adding collaborators in repository settings
-2. Downloading the HTML file and sharing directly
-3. Converting to PDF for static distribution
+4. `companies_lawsuits`
+- File: `companies_lawsuits.csv`
+- Produced by: `find_lawsuits.py`
+- Adds:
+	`lawsuits_found`, `lawsuits_count`, `lawsuits_sample`
+- May append `active_lawsuit` to `signal_tag`
 
-## Created By
+5. `companies_rebrands`
+- File: `companies_rebrands.csv`
+- Produced by: `find_rebrands.py`
+- Adds:
+	`rebrand_flag`, `rebrand_reason`, `rebrand_sample`
+- May append `rebrand` to `signal_tag`
 
-Trillium Hiring Services - Recruitment Technology Consulting
+6. `contacts_raw`
+- File: `contacts_raw.csv`
+- Produced by: `waterfall_enricher.py`
+- Contact schema:
+	`email`, `first_name`, `last_name`, `company`, `title`, `source`, `is_dm`,
+	`hunter_confidence`, `signal_tag`, `registered_date`, `collected_date`, `domain`, `website`
 
-## License
+7. `contacts_verified`
+- File: `contacts_verified.csv`
+- Produced by: `verify_emails.py`
+- Adds:
+	`mx_pass`, `reject_reason`, `verification_score`, `domain_age_days`, `smtp_ok`, `catch_all`
 
-Private - Internal use only
+8. `contacts_scored`
+- File: `contacts_scored.csv`
+- Produced by: `freshness_scorer.py`
+- Adds:
+	`freshness_score`, `confidence_level`, `score_breakdown`
+
+9. `contacts_scored_qualified`
+- File: `contacts_scored_qualified.csv`
+- Produced by: `freshness_scorer.py`
+- Filtered by `--min-level` threshold
+
+10. `hubspot_import`
+- File: `hubspot_import.csv`
+- Produced by: `build_csv.py`
+- HubSpot headers:
+	`Email`, `First Name`, `Last Name`, `Company`, `Job Title`, `Phone`,
+	`Website`, `City`, `Signal Tag`, `LinkedIn URL`, `Notes`
+
+11. `rejects`
+- File: `rejects.csv`
+- Produced by: `build_csv.py`
+- Contains records filtered by quality gates plus `reject_reason`
+
+## Last Run Snapshot (Executed 2026-03-27)
+
+Recent verification runs were executed in both hosted discovery and strict verify paths.
+
+Hosted discovery command used:
+
+```bash
+cd scripts
+/home/codespace/.python/current/bin/python run_pipeline.py \
+	--sos test_data/sos_realistic.csv \
+	--mode hosted_discovery --soft-report \
+	--output-dir output_hosted_smoke
+```
+
+Observed hosted-mode status:
+
+- Step 1 `Company Enrichment`: `OK`
+- Step 2 `Headcount Estimation`: `OK`
+- Step 3 `Lawsuit Detection`: `OK` (CourtListener returned HTTP 403 for all lookups)
+- Step 4 `Rebrand Detection`: `OK`
+- Step 7 `Waterfall Contact Enrichment`: `OK`
+- Step 8 `Email Verification`: `OK`
+- Step 9 `Freshness Scoring`: `OK`
+- HubSpot export: intentionally skipped in hosted mode
+
+Hosted run totals:
+
+- Companies enriched: `5`
+- Companies sized: `5`
+- Lawsuit rows: `5`
+- Rebrand rows: `5`
+- Contacts raw: `0`
+- Contacts verified: `0`
+- Contacts scored: `30` (all `C` in this sample)
+- Contacts qualified: `0` at min-level `B`
+- Top-of-funnel alert pattern: officer permutation dominance
+
+Artifacts from that run are under `scripts/output_hosted_smoke/`.
+
+Strict verify command used:
+
+```bash
+cd scripts
+/home/codespace/.python/current/bin/python run_pipeline.py \
+	--sos test_data/sos_realistic.csv \
+	--mode strict_verify --smtp \
+	--output-dir output_day1_impl
+```
+
+This path currently exits non-zero when contract gates are not met, as intended.
+
+## Validation Run
+
+The included test suite was also executed:
+
+```bash
+cd scripts
+/home/codespace/.python/current/bin/python test_pipeline.py
+```
+
+Result: `43 passed, 0 failed`.
+
+Current suite status after mode and diagnostics updates: `83 passed, 0 failed`.

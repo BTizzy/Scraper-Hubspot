@@ -1,0 +1,9 @@
+artifact_type,artifact_path,row_count
+input_pool,scripts/output_pool_run_20260311/input_pool.csv,5
+pool_report_json,scripts/output_pool_run_20260311/input_pool_report.json,
+batch_companies_enriched,scripts/output_pool_run_20260311/20260311_contract/batch_001/companies_enriched.csv,5
+batch_companies_refresh,scripts/output_pool_run_20260311/20260311_contract/batch_001/companies_refresh.csv,5
+batch_contacts_raw,scripts/output_pool_run_20260311/20260311_contract/batch_001/contacts_raw.csv,0
+batch_contacts_scored,scripts/output_pool_run_20260311/20260311_contract/batch_001/contacts_scored.csv,0
+batch_hubspot_import,scripts/output_pool_run_20260311/20260311_contract/batch_001/hubspot_import.csv,0
+contract_summary_json,scripts/output_pool_run_20260311/20260311_contract/daily_contract_summary.json,

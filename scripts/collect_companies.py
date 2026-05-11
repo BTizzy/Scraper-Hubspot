@@ -22,6 +22,7 @@ import csv
 import json
 import re
 import requests
+import socket
 import time
 import argparse
 from datetime import datetime, timedelta
@@ -36,6 +37,75 @@ OC_SEARCH = "https://api.opencorporates.com/v0.4/companies/search?q={q}&jurisdic
 OC_COMPANY = "https://api.opencorporates.com/v0.4/companies/us_wa/{number}"
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)'}
+OC_TIMEOUT_SECONDS = 6
+OC_FAILURE_STREAK_LIMIT = 3
+OPENCORP_STATE = {
+    'disabled': False,
+    'failure_streak': 0,
+    'disable_reason': '',
+}
+DDG_TIMEOUT_SECONDS = 4
+DDG_FAILURE_STREAK_LIMIT = 3
+DDG_STATE = {
+    'disabled': False,
+    'failure_streak': 0,
+    'disable_reason': '',
+}
+
+
+def update_opencorporates_state(state: dict, outcome: str, reason: str = '') -> dict:
+    """Advance OpenCorporates circuit-breaker state from a request outcome."""
+    next_state = dict(state)
+    if outcome in ('success', 'not_found'):
+        next_state['failure_streak'] = 0
+    elif outcome == 'transient_failure':
+        next_state['failure_streak'] = int(next_state.get('failure_streak', 0)) + 1
+        if next_state['failure_streak'] >= OC_FAILURE_STREAK_LIMIT:
+            next_state['disabled'] = True
+            next_state['disable_reason'] = reason or 'repeated transient failures'
+    elif outcome == 'permanent_disable':
+        next_state['disabled'] = True
+        next_state['disable_reason'] = reason or 'provider unavailable'
+    return next_state
+
+
+def opencorporates_enabled() -> bool:
+    return not OPENCORP_STATE.get('disabled', False)
+
+
+def record_opencorporates_outcome(outcome: str, reason: str = ''):
+    """Persist OpenCorporates circuit-breaker updates and emit a disable notice once."""
+    global OPENCORP_STATE
+    was_enabled = opencorporates_enabled()
+    OPENCORP_STATE = update_opencorporates_state(OPENCORP_STATE, outcome, reason)
+    if was_enabled and not opencorporates_enabled():
+        print(f"  ⚠ OpenCorporates disabled for remainder of run: {OPENCORP_STATE.get('disable_reason', reason)}")
+
+
+def update_duckduckgo_state(state: dict, outcome: str, reason: str = '') -> dict:
+    """Advance DuckDuckGo circuit-breaker state from a request outcome."""
+    next_state = dict(state)
+    if outcome in ('success', 'not_found'):
+        next_state['failure_streak'] = 0
+    elif outcome == 'transient_failure':
+        next_state['failure_streak'] = int(next_state.get('failure_streak', 0)) + 1
+        if next_state['failure_streak'] >= DDG_FAILURE_STREAK_LIMIT:
+            next_state['disabled'] = True
+            next_state['disable_reason'] = reason or 'repeated search failures'
+    return next_state
+
+
+def duckduckgo_enabled() -> bool:
+    return not DDG_STATE.get('disabled', False)
+
+
+def record_duckduckgo_outcome(outcome: str, reason: str = ''):
+    """Persist DuckDuckGo circuit-breaker updates and emit a disable notice once."""
+    global DDG_STATE
+    was_enabled = duckduckgo_enabled()
+    DDG_STATE = update_duckduckgo_state(DDG_STATE, outcome, reason)
+    if was_enabled and not duckduckgo_enabled():
+        print(f"  ⚠ DuckDuckGo disabled for remainder of run: {DDG_STATE.get('disable_reason', reason)}")
 
 
 def search_opencorporates(name: str) -> dict | None:
@@ -43,17 +113,24 @@ def search_opencorporates(name: str) -> dict | None:
     
     Falls back gracefully if the API returns 401/403 (free tier removed).
     """
+    if not opencorporates_enabled():
+        return None
     q = quote_plus(name)
     url = OC_SEARCH.format(q=q)
     try:
-        r = requests.get(url, timeout=12, headers=HEADERS)
+        r = requests.get(url, timeout=OC_TIMEOUT_SECONDS, headers=HEADERS)
         if r.status_code in (401, 403, 429):
             # API key required or rate limited — skip silently
+            record_opencorporates_outcome('permanent_disable', f'API status {r.status_code}')
+            return None
+        if r.status_code >= 500:
+            record_opencorporates_outcome('transient_failure', f'API status {r.status_code}')
             return None
         r.raise_for_status()
         data = r.json()
         results = data.get('results', {}).get('companies', [])
         if not results:
+            record_opencorporates_outcome('not_found')
             return None
         c = results[0].get('company', {})
         result = {
@@ -78,7 +155,7 @@ def search_opencorporates(name: str) -> dict | None:
         if number:
             try:
                 detail_url = OC_COMPANY.format(number=number)
-                dr = requests.get(detail_url, timeout=12, headers=HEADERS)
+                dr = requests.get(detail_url, timeout=OC_TIMEOUT_SECONDS, headers=HEADERS)
                 if dr.status_code == 200:
                     detail = dr.json().get('results', {}).get('company', {})
                     # Officers
@@ -98,11 +175,13 @@ def search_opencorporates(name: str) -> dict | None:
                             result['previous_names'].append(pn)
             except Exception:
                 pass  # officer detail is optional
+        record_opencorporates_outcome('success')
         return result
     except Exception as e:
         # Don't print 401/403 errors — they just mean no API key
         if '401' not in str(e) and '403' not in str(e):
             print(f"  ✗ OpenCorporates error for '{name}': {e}")
+        record_opencorporates_outcome('transient_failure', type(e).__name__)
         return None
 
 
@@ -111,9 +190,14 @@ def scrape_opencorporates_html(name: str) -> dict | None:
     Fallback: scrape the OpenCorporates HTML search page when API is locked.
     Returns basic company data (name, URL, officers if on the page).
     """
+    if not opencorporates_enabled():
+        return None
     try:
         search_url = f"https://opencorporates.com/companies?q={quote_plus(name)}&jurisdiction_code=us_wa"
-        r = requests.get(search_url, timeout=12, headers=HEADERS)
+        r = requests.get(search_url, timeout=OC_TIMEOUT_SECONDS, headers=HEADERS)
+        if r.status_code >= 500:
+            record_opencorporates_outcome('transient_failure', f'HTML status {r.status_code}')
+            return None
         if r.status_code != 200:
             return None
         soup = BeautifulSoup(r.text, 'html.parser')
@@ -126,6 +210,7 @@ def scrape_opencorporates_html(name: str) -> dict | None:
                     result_link = a
                     break
         if not result_link:
+            record_opencorporates_outcome('not_found')
             return None
         
         company_url = result_link['href']
@@ -140,7 +225,7 @@ def scrape_opencorporates_html(name: str) -> dict | None:
         
         # Try to fetch the company detail page for officers
         try:
-            dr = requests.get(company_url, timeout=12, headers=HEADERS)
+            dr = requests.get(company_url, timeout=OC_TIMEOUT_SECONDS, headers=HEADERS)
             if dr.status_code == 200:
                 detail_soup = BeautifulSoup(dr.text, 'html.parser')
                 # Look for officers section
@@ -156,9 +241,10 @@ def scrape_opencorporates_html(name: str) -> dict | None:
                             })
         except Exception:
             pass
-        
+        record_opencorporates_outcome('success')
         return result
     except Exception:
+        record_opencorporates_outcome('transient_failure', 'html_exception')
         return None
 
 
@@ -170,6 +256,37 @@ def clean_company_for_domain(name: str) -> str:
     clean = re.sub(suffixes, '', name, flags=re.IGNORECASE)
     clean = re.sub(r'[^a-zA-Z0-9\s]', '', clean).strip()
     return clean.lower().replace(' ', '')
+
+
+def normalize_domain(value: str) -> str:
+    """Normalize URL/domain strings to a plain host name."""
+    if not value:
+        return ''
+    value = value.strip()
+    if not value:
+        return ''
+    if value.startswith('//'):
+        value = 'https:' + value
+    elif not value.startswith('http'):
+        value = 'https://' + value
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return ''
+    domain = parsed.netloc.lower().strip()
+    if domain.startswith('www.'):
+        domain = domain[4:]
+    domain = domain.split(':')[0]
+    return domain
+
+
+def domain_has_dns(domain: str) -> bool:
+    """Quick A/AAAA check to ensure domain resolves."""
+    try:
+        socket.getaddrinfo(domain, None)
+        return True
+    except Exception:
+        return False
 
 
 def domain_has_mx(domain: str) -> bool:
@@ -194,70 +311,247 @@ def domain_responds(domain: str) -> bool:
     return False
 
 
+def try_domain_variants(slug: str) -> str:
+    """Try many modern TLD variants for a slug and return first valid hit."""
+    tlds = [
+        '.com', '.net', '.org', '.co', '.us', '.biz',
+        '.io', '.dev', '.app', '.tech', '.software', '.company', '.business',
+        '.co.uk', '.com.au', '.ca', '.de', '.ch', '.eu',
+        '.ai', '.cloud', '.digital', '.online', '.site', '.space',
+    ]
+    for tld in tlds:
+        domain = slug + tld
+        if domain_has_dns(domain) or domain_has_mx(domain) or domain_responds(domain):
+            return domain
+    return ''
+
+
 def discover_domain_duckduckgo(company_name: str) -> str:
     """Search DuckDuckGo for the company website."""
+    if not duckduckgo_enabled():
+        return ''
     query = f'"{company_name}" seattle WA website'
+    skip_domains = ['facebook.com', 'linkedin.com', 'yelp.com', 'twitter.com',
+                    'instagram.com', 'bbb.org', 'yellowpages.com', 'mapquest.com',
+                    'google.com', 'bing.com', 'wa.gov', 'sec.gov', 'wikipedia.org',
+                    'bloomberg.com', 'dnb.com', 'opencorporates.com', 'zoominfo.com',
+                    'crunchbase.com', 'indeed.com', 'glassdoor.com', 'github.com',
+                    'medium.com', 'reddit.com', 'producthunt.com', 'techcrunch.com']
+
+    def is_allowed_domain(domain: str) -> bool:
+        return bool(domain) and not any(domain == s or domain.endswith('.' + s) for s in skip_domains)
+
     try:
         r = requests.get(
             'https://html.duckduckgo.com/html/',
             params={'q': query},
             headers=HEADERS,
-            timeout=10,
+            timeout=DDG_TIMEOUT_SECONDS,
         )
+        if r.status_code >= 500:
+            record_duckduckgo_outcome('transient_failure', f'status {r.status_code}')
+            return ''
         soup = BeautifulSoup(r.text, 'html.parser')
+
+        # Prefer explicit LinkedIn company URLs as a high-signal hint.
+        for link in soup.find_all('a', href=True):
+            href = link.get('href', '')
+            if 'linkedin.com/company/' not in href:
+                continue
+            m = re.search(r'linkedin\.com/company/([a-z0-9\-]+)', href.lower())
+            if not m:
+                continue
+            slug_guess = m.group(1).replace('-', '')
+            if slug_guess:
+                candidate = slug_guess + '.com'
+                if domain_has_dns(candidate) or domain_responds(candidate):
+                    record_duckduckgo_outcome('success')
+                    return candidate
+
         # DuckDuckGo HTML results have .result__url spans
         for link in soup.select('a.result__url'):
             href = link.get('href', '') or link.get_text(strip=True)
             if href:
-                # Extract domain from the URL
-                if not href.startswith('http'):
-                    href = 'https://' + href
-                parsed = urlparse(href)
-                domain = parsed.netloc.lower()
-                # Skip social media, directories, government sites
-                skip_domains = ['facebook.com', 'linkedin.com', 'yelp.com', 'twitter.com',
-                                'instagram.com', 'bbb.org', 'yellowpages.com', 'mapquest.com',
-                                'google.com', 'bing.com', 'wa.gov', 'sec.gov', 'wikipedia.org',
-                                'bloomberg.com', 'dnb.com', 'opencorporates.com', 'zoominfo.com',
-                                'crunchbase.com', 'indeed.com', 'glassdoor.com']
-                if domain and not any(domain.endswith(s) for s in skip_domains):
+                domain = normalize_domain(href)
+                if is_allowed_domain(domain):
+                    record_duckduckgo_outcome('success')
                     return domain
         # Fallback: try result__a links
         for link in soup.select('a.result__a'):
             href = link.get('href', '')
             if href and href.startswith('http'):
-                parsed = urlparse(href)
-                domain = parsed.netloc.lower()
-                skip_domains = ['facebook.com', 'linkedin.com', 'yelp.com', 'twitter.com',
-                                'instagram.com', 'bbb.org', 'yellowpages.com', 'mapquest.com',
-                                'google.com', 'bing.com', 'wa.gov', 'wikipedia.org']
-                if domain and not any(domain.endswith(s) for s in skip_domains):
+                domain = normalize_domain(href)
+                if is_allowed_domain(domain):
+                    record_duckduckgo_outcome('success')
                     return domain
+        # Final fallback: generic anchor scan for hidden URLs in DDG HTML
+        for link in soup.find_all('a', href=True):
+            href = link.get('href', '')
+            if not href:
+                continue
+            if href.startswith('//'):
+                href = 'https:' + href
+            elif href.startswith('/'):
+                continue
+            elif not href.startswith('http'):
+                href = 'https://' + href
+            domain = normalize_domain(href)
+            if is_allowed_domain(domain):
+                record_duckduckgo_outcome('success')
+                return domain
+        record_duckduckgo_outcome('not_found')
     except Exception as e:
         print(f"  ✗ DuckDuckGo search failed: {e}")
+        record_duckduckgo_outcome('transient_failure', type(e).__name__)
     return ''
 
 
 def discover_website(company_name: str) -> str:
     """
     Try multiple strategies to find a company's website domain:
-      1. DuckDuckGo search
-      2. Direct domain guess (companyname.com)
+      1. DuckDuckGo search with filtering
+      2. Direct domain variants from cleaned slug
+      3. Hyphenated/short-name variants for multi-word companies
     """
     # Strategy 1: DuckDuckGo
     domain = discover_domain_duckduckgo(company_name)
-    if domain and (domain_has_mx(domain) or domain_responds(domain)):
+    if domain and (domain_has_dns(domain) or domain_has_mx(domain) or domain_responds(domain)):
         return domain
 
     # Strategy 2: Guess common domain patterns
     slug = clean_company_for_domain(company_name)
     if slug:
-        for tld in ['.com', '.net', '.co']:
-            guess = slug + tld
-            if domain_responds(guess):
-                return guess
+        guessed = try_domain_variants(slug)
+        if guessed:
+            return guessed
+
+        words = re.split(r'[^a-z0-9]+', company_name.lower())
+        words = [w for w in words if w and w not in {
+            'llc', 'inc', 'corp', 'company', 'co', 'ltd', 'group',
+            'services', 'holdings', 'the', 'and'
+        }]
+
+        if len(words) > 1:
+            guessed = try_domain_variants('-'.join(words))
+            if guessed:
+                return guessed
+
+        if len(words) > 2:
+            guessed = try_domain_variants(words[0] + words[-1])
+            if guessed:
+                return guessed
 
     return domain or ''  # return DDG result even if we couldn't verify it
+
+
+def scrape_people_from_website(domain: str, max_people: int = 6) -> list[dict]:
+    """
+    Fallback people extraction from company website when SOS/OC officers are missing.
+    Extract likely names + role hints from team/about/leadership pages.
+    """
+    if not domain:
+        return []
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+    }
+    paths = [
+        '', '/about', '/about-us', '/team', '/our-team', '/leadership',
+        '/staff', '/people', '/contact', '/meet-the-team',
+    ]
+    role_words = [
+        'owner', 'founder', 'co-founder', 'ceo', 'president', 'principal',
+        'manager', 'director', 'partner', 'vp', 'operations',
+    ]
+    ignore_tokens = {
+        'privacy', 'policy', 'terms', 'service', 'cookie', 'careers', 'blog',
+        'home', 'contact', 'about', 'login', 'signup', 'register',
+    }
+
+    people = []
+    seen = set()
+
+    name_stop_tokens = {
+        'about', 'automatic', 'blog', 'careers', 'comprehensive', 'contact', 'county',
+        'electric', 'fixtures', 'garbage', 'generators', 'helpful', 'heaters', 'home',
+        'leadership', 'our', 'people', 'plumbing', 'popular', 'privacy', 'services',
+        'small', 'staff', 'systems', 'team', 'terms', 'tips', 'water',
+    }
+    token_re = re.compile(r"^[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?$")
+
+    def add_person(name: str, title: str = ''):
+        raw = (name or '').strip()
+        parts = [p.strip(".,!?:;\"()[]{}") for p in re.split(r'\s+', raw) if p]
+        if len(parts) < 2 or len(parts) > 4:
+            return
+        if any(any(ch.isdigit() for ch in p) for p in parts):
+            return
+        if any(p.lower() in ignore_tokens for p in parts):
+            return
+        if not all(token_re.match(p) for p in parts):
+            return
+        if any(p.lower() in name_stop_tokens for p in parts):
+            return
+
+        normalized = ' '.join(parts)
+        key = normalized.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        people.append({'name': normalized, 'title': (title or '').strip()})
+
+    for path in paths:
+        if len(people) >= max_people:
+            break
+
+        fetched = None
+        for scheme in ('https', 'http'):
+            try:
+                url = f'{scheme}://{domain}{path}'
+                resp = requests.get(url, timeout=6, headers=headers, allow_redirects=True)
+                if resp.status_code == 200 and resp.text:
+                    fetched = resp.text
+                    break
+            except Exception:
+                continue
+
+        if not fetched:
+            continue
+
+        soup = BeautifulSoup(fetched, 'html.parser')
+
+        # Pattern 1: heading text that looks like person names.
+        for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'strong', 'b']):
+            text = tag.get_text(' ', strip=True)
+            if not text:
+                continue
+            title = ''
+            nearby = ''
+            parent = tag.find_parent(['article', 'section', 'div', 'li'])
+            if parent:
+                nearby = parent.get_text(' ', strip=True).lower()
+                for rw in role_words:
+                    if rw in nearby:
+                        title = rw.title()
+                        break
+            add_person(text, title=title)
+            if len(people) >= max_people:
+                break
+
+        if len(people) >= max_people:
+            break
+
+        # Pattern 2: explicit "Name, Title" text snippets.
+        text = soup.get_text(' ', strip=True)
+        for m in re.finditer(r'([A-Z][a-z]+\s+[A-Z][a-z]+)\s*,\s*([A-Za-z][A-Za-z\s\-/]{2,40})', text):
+            name = m.group(1)
+            title = m.group(2)
+            if any(rw in title.lower() for rw in role_words):
+                add_person(name, title=title)
+            if len(people) >= max_people:
+                break
+
+    return people[:max_people]
 
 
 # ── Signal tagging ─────────────────────────────────────────────────────────────
@@ -394,13 +688,6 @@ def enrich(input_csv: str, output_csv: str):
                 row['current_status'] = row.get('status', '')
                 row['registered_address'] = row.get('principal_office', '')
             
-            # Write officers as JSON
-            row['officers'] = json.dumps(all_officers) if all_officers else ''
-            if all_officers:
-                print(f"  ✓ {len(all_officers)} officers: {', '.join(o['name'] for o in all_officers[:3])}")
-            else:
-                print(f"  ✗ No officers found")
-
             # ── Domain discovery ──
             existing_website = row.get('website', '') or row.get('domain', '')
             if existing_website:
@@ -425,6 +712,20 @@ def enrich(input_csv: str, output_csv: str):
                     row['domain'] = ''
                     row['website'] = ''
                     print(f"  ✗ No website found")
+
+            # If source systems lacked officers, try website people extraction.
+            if not all_officers and row.get('domain'):
+                site_people = scrape_people_from_website(row.get('domain', ''))
+                if site_people:
+                    all_officers = site_people
+                    print(f"  ✓ Fallback people from website: {len(site_people)}")
+
+            # Write officers as JSON
+            row['officers'] = json.dumps(all_officers) if all_officers else ''
+            if all_officers:
+                print(f"  ✓ {len(all_officers)} officers: {', '.join(o['name'] for o in all_officers[:3])}")
+            else:
+                print(f"  ✗ No officers found")
 
             # ── Formation signal ──
             signals = []

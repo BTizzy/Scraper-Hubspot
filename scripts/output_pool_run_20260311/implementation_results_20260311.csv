@@ -1,0 +1,4 @@
+step_id,step_name,status,metric_1,metric_2,metric_3,artifact_path,notes
+1,LI-safe adapter + source budgets,completed,max_search_domains=25,max_jobs_news_domains=25,max_li_safe_domains=15,scripts/build_input_pool.py,"Added --enable-li-safe-discovery, --max-li-safe-domains, --max-enrichment-rows, --source-budget-json"
+2,Test coverage + regression,completed,tests_passed=76,tests_failed=0,new_pool_tests=1,scripts/test_pipeline.py,"Added build_input_pool schema+dedupe test; full suite passed"
+3,Real pool build + contract run,completed,pool_final_rows=5,real_active_contacts=0,contract_passed=false,scripts/output_pool_run_20260311/20260311_contract/daily_contract_summary.json,"Discovery endpoints timed out in this run; pipeline executed end-to-end and produced CSV outputs"

@@ -1,0 +1,6 @@
+company_name,registered_date,website,domain,company_number,jurisdiction_code,current_status,registered_address,signal_tag,source,collected_date
+Emerald City Roofing LLC,2025-01-15,https://emeraldcityroofing.com,emeraldcityroofing.com,604123456,us_wa,Active,"123 Main St, Seattle WA 98101",new_business,sos:sos_realistic;sos:sos_sample,2026-03-11
+Pacific Northwest Electric Inc,2024-09-20,https://pacificnorthwestelectric.com,pacificnorthwestelectric.com,604234567,us_wa,Active,"456 Pine Ave, Bellevue WA 98004",new_business,sos:sos_realistic;sos:sos_sample,2026-03-11
+Cascade Building Services LLC,2024-11-01,https://cascadebuilding.com,cascadebuilding.com,604345678,us_wa,Active,"789 Oak Blvd, Kent WA 98032",new_business,sos:sos_realistic;sos:sos_sample,2026-03-11
+Sound Transit Staffing Group LLC,2025-03-01,https://soundstaffing.com,soundstaffing.com,604456789,us_wa,Active,"321 Cedar Way, Renton WA 98057",new_business,sos:sos_realistic;sos:sos_sample,2026-03-11
+Puget Sound Plumbing Co,2024-06-10,https://pugetsoundplumbing.com,pugetsoundplumbing.com,604567890,us_wa,Active,"654 Elm Dr, Tacoma WA 98402",new_business,sos:sos_realistic;sos:sos_sample,2026-03-11

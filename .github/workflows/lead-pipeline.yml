@@ -1,0 +1,68 @@
+name: Lead Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      sos_path:
+        description: "Path to SOS CSV relative to scripts/"
+        required: false
+        default: "test_data/sos_representative.csv"
+      min_level:
+        description: "Minimum confidence level"
+        required: false
+        default: "C"
+  schedule:
+    - cron: "0 8 * * *"
+
+jobs:
+  discover_hosted:
+    name: Hosted Discovery (Provisional)
+    runs-on: ubuntu-latest
+    env:
+      SOS_PATH: ${{ github.event.inputs.sos_path }}
+      MIN_LEVEL: ${{ github.event.inputs.min_level }}
+      THEHARVESTER_SOURCES: crtsh,anubis,bing,duckduckgo
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scripts/requirements.txt
+
+      - name: Install optional free OSINT tools
+        run: |
+          python -m pip install theHarvester || true
+
+      - name: Run hosted discovery mode
+        run: |
+          cd scripts
+          SOS_PATH_EFFECTIVE="${SOS_PATH:-test_data/sos_representative.csv}"
+          MIN_LEVEL_EFFECTIVE="${MIN_LEVEL:-C}"
+          python run_pipeline.py \
+            --sos "$SOS_PATH_EFFECTIVE" \
+            --mode hosted_discovery \
+            --soft-report \
+            --min-level "$MIN_LEVEL_EFFECTIVE" \
+            --output-dir output_hosted_discovery
+
+      - name: Evaluate hosted readiness
+        run: |
+          cd scripts
+          python hosted_readiness.py \
+            --contract-report output_hosted_discovery/run_contract_report.json \
+            --daily-kpi-report output_hosted_discovery/daily_kpi_report.json \
+            --output output_hosted_discovery/hosted_readiness_report.json || true
+
+      - name: Upload hosted artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hosted-discovery-output
+          path: scripts/output_hosted_discovery/
+          if-no-files-found: warn

@@ -1,0 +1,4 @@
+Email,First Name,Last Name,Company,Job Title,Phone,Website,City,Signal Tag,LinkedIn URL,Notes
+james@pugetsoundplumbing.com,James,Wilson,Puget Sound Plumbing Co,President,,pugetsoundplumbing.com,Seattle,new_business;active_hiring;website_refresh,,src=0.30(officer_permutation) ver=0.30(mx=✓) fresh=1.00(0d) sig=0.90(new_business;active_hiring;website_refresh)
+david@soundstaffing.com,David,Kim,Sound Transit Staffing Group LLC,Managing Member,,soundstaffing.com,Seattle,new_business;website_refresh,,src=0.30(officer_permutation) ver=0.30(mx=✓) fresh=1.00(0d) sig=0.90(new_business;website_refresh)
+jennifer@soundstaffing.com,Jennifer,Kim,Sound Transit Staffing Group LLC,Member,,soundstaffing.com,Seattle,new_business;website_refresh,,src=0.30(officer_permutation) ver=0.30(mx=✓) fresh=1.00(0d) sig=0.90(new_business;website_refresh)

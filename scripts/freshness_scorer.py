@@ -76,17 +76,21 @@ def days_since(date_str: str) -> float:
 def verification_score(mx_pass: bool, smtp_ok: str = '', catch_all: str = '') -> float:
     """
     Score based on how deeply the email was verified.
-    MX only = 0.3, MX + SMTP accept = 0.7, MX + SMTP + not catch-all = 1.0
+    MX only = 0.5, MX + SMTP accept = 0.75, MX + SMTP + not catch-all = 1.0
+    Raised MX-only from 0.3→0.5 because in free pipeline mode (no SMTP),
+    MX is our strongest verification signal and most small-biz domains pass.
     """
     score = 0.0
+    smtp_norm = str(smtp_ok or '').strip().upper()
+    catch_norm = str(catch_all or '').strip().upper()
     if mx_pass:
-        score = 0.3
-        if smtp_ok == 'True' or smtp_ok == 'ACCEPT':
-            score = 0.7
-            if catch_all == 'False':
+        score = 0.5
+        if smtp_norm in ('TRUE', 'ACCEPT'):
+            score = 0.75
+            if catch_norm == 'FALSE':
                 score = 1.0  # best: SMTP accepted AND domain is NOT catch-all
-            elif catch_all == 'True':
-                score = 0.5  # catch-all dampens confidence
+            elif catch_norm == 'TRUE':
+                score = 0.55  # catch-all dampens confidence
     return score
 
 
@@ -122,6 +126,13 @@ def compute_freshness_score(row: dict) -> dict:
     # Component 1: Source quality (25% weight)
     source = row.get('source', '').lower()
     src_score = SOURCE_QUALITY.get(source, 0.5)  # default to 0.5, not 0.3
+
+    # Guessed officer permutations should never count as strong leads unless SMTP
+    # explicitly accepted the mailbox and the domain is not catch-all.
+    smtp_value = str(row.get('smtp_ok', '')).upper()
+    catch_all_value = str(row.get('catch_all', '')).upper()
+    if source == 'officer_permutation' and not (smtp_value == 'ACCEPT' and catch_all_value == 'FALSE'):
+        src_score = min(src_score, 0.30)
     
     # Component 2: Verification depth (25% weight)
     mx_pass = str(row.get('mx_pass', '')).lower() in ('true', '1', 'yes')
@@ -149,6 +160,22 @@ def compute_freshness_score(row: dict) -> dict:
         sig_score = max(signal_freshness_score(s, signal_date) for s in signals) if signals else 0.0
     else:
         sig_score = 0.0
+
+    # Component 5: Source consensus bonus (cross-source corroboration).
+    try:
+        source_count = int(str(row.get('source_count', '') or '0').strip() or 0)
+    except ValueError:
+        source_count = 0
+    if source_count <= 0:
+        source_sources = str(row.get('source_sources', '') or '').strip()
+        if source_sources:
+            source_count = len([s for s in source_sources.split(';') if s.strip()])
+    if source_count >= 3:
+        consensus_bonus = 0.12
+    elif source_count == 2:
+        consensus_bonus = 0.08
+    else:
+        consensus_bonus = 0.0
     
     # Weighted composite — equal weights since all matter for Trillium's use case
     composite = (
@@ -157,10 +184,16 @@ def compute_freshness_score(row: dict) -> dict:
         0.25 * freshness +
         0.25 * sig_score
     )
+
+    composite = min(1.0, composite + consensus_bonus)
     
     # Bonus: if record has a signal AND MX passes, bump score (these are the leads we want)
     if sig_score > 0 and mx_pass:
         composite = min(1.0, composite + 0.15)
+
+    # Penalize single-source guessed contacts unless SMTP explicitly accepted.
+    if source == 'officer_permutation' and source_count <= 1 and not (smtp_value == 'ACCEPT' and catch_all_value == 'FALSE'):
+        composite = max(0.0, composite - 0.10)
     
     composite = round(composite, 3)
     
@@ -170,10 +203,27 @@ def compute_freshness_score(row: dict) -> dict:
         if composite >= VERIFICATION_LEVELS[level]['min_score']:
             confidence_level = level
             break
+
+    if source == 'officer_permutation' and not (smtp_value == 'ACCEPT' and catch_all_value == 'FALSE'):
+        smtp_status_val = str(row.get('smtp_status', '')).lower()
+        _transport_blocked = smtp_status_val in ('transport_blocked', 'mx_lookup_failed')
+        if _transport_blocked:
+            # TCP-level failure prevented SMTP verification — this is NOT a rejection.
+            # The probe never reached the SMTP layer so we have no evidence the mailbox
+            # is invalid.  Allow up to B-tier (composite must earn it via MX presence +
+            # strong buying signal + fresh domain data).  Cap at B since we cannot
+            # confirm the mailbox directly without a successful SMTP exchange.
+            if confidence_level == 'A':
+                confidence_level = 'B'
+        elif confidence_level in ('A', 'B'):
+            # SMTP was reachable but not confirmed (REJECT, soft_defer_4xx,
+            # not_attempted, or empty smtp_ok).  Treat as unverified — hard cap at C.
+            confidence_level = 'C'
     
     # Build breakdown
     breakdown = (
         f"src={src_score:.2f}({source or 'unknown'}) "
+        f"multi={source_count} "
         f"ver={v_score:.2f}(mx={'✓' if mx_pass else '✗'}) "
         f"fresh={freshness:.2f}({int(collection_age)}d) "
         f"sig={sig_score:.2f}({signal_tag or 'none'})"
@@ -209,17 +259,22 @@ def score_file(input_csv: str, output_csv: str, min_level: str = 'C'):
     # Sort by score descending (best leads first)
     scored.sort(key=lambda r: r['freshness_score'], reverse=True)
     
-    # Write all scored records
+    # Always create the full scored output, even when empty.
     if scored:
         fieldnames = list(scored[0].keys())
-        with open(output_csv, 'w', newline='', encoding='utf-8') as fout:
-            writer = csv.DictWriter(fout, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(scored)
+    else:
+        fieldnames = ['email', 'first_name', 'last_name', 'company', 'title',
+                      'source', 'freshness_score', 'confidence_level', 'score_breakdown']
+    with open(output_csv, 'w', newline='', encoding='utf-8') as fout:
+        writer = csv.DictWriter(fout, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(scored)
     
     # Write filtered file (only records meeting min_level)
-    min_score = VERIFICATION_LEVELS.get(min_level, {}).get('min_score', 0)
-    qualified = [r for r in scored if r['freshness_score'] >= min_score]
+    # Filter by final confidence_level, not raw score, to respect demotions (e.g., officer_permutation → C)
+    tier_order = {'A': 0, 'B': 1, 'C': 2, 'D': 3}
+    min_tier = tier_order.get(min_level, 3)
+    qualified = [r for r in scored if tier_order.get(r.get('confidence_level', 'D'), 3) <= min_tier]
     filtered_path = output_csv.replace('.csv', f'_qualified.csv')
     # Always create the qualified file (even if empty) so downstream steps don't fail
     if qualified:

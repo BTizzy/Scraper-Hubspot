@@ -1,0 +1,88 @@
+{
+  "contract_enabled": false,
+  "contract_evaluation": {},
+  "contract_failed": false,
+  "funnel": {
+    "confidence_mix": {
+      "B": 30
+    },
+    "counts": {
+      "raw": 30,
+      "rejected": 0,
+      "scored": 30,
+      "verified": 30
+    },
+    "reject_reasons": {},
+    "smtp": {
+      "accepted": 0,
+      "attempt_status": {
+        "transport_blocked": 30
+      },
+      "attempted": 30,
+      "not_attempted": 0,
+      "rejected": 0,
+      "unknown": 30
+    },
+    "source_mix_raw": {
+      "officer_permutation": 30
+    },
+    "source_mix_scored": {
+      "officer_permutation": 30
+    }
+  },
+  "generated_at": "2026-03-11T14:56:46.795410",
+  "input": "/tmp/daily_sos_s0ev574o/sos_novel.csv",
+  "input_profile": {
+    "age_buckets": {
+      "0_365_days": 0,
+      "366_730_days": 5,
+      "731_plus_days": 0,
+      "unknown": 0
+    },
+    "rows": 5,
+    "with_registered_date": 5
+  },
+  "output_dir": "/workspaces/Scraper-Hubspot/scripts/daily_output_sim4/20260311_run1",
+  "pipeline_failed": false,
+  "signal_diagnostics": {
+    "hiring": {
+      "new_business_only": 3,
+      "problem_rows": 0,
+      "rows": 5,
+      "signal_hits": 1,
+      "status_counts": {
+        "match": 1,
+        "ok_no_match": 4
+      }
+    },
+    "lawsuits": {
+      "new_business_only": 4,
+      "problem_rows": 0,
+      "rows": 5,
+      "signal_hits": 0,
+      "status_counts": {
+        "ok_no_match": 5
+      }
+    },
+    "rebrands": {
+      "new_business_only": 4,
+      "problem_rows": 5,
+      "rows": 5,
+      "signal_hits": 0,
+      "status_counts": {
+        "no_row_history": 5
+      }
+    },
+    "refresh": {
+      "new_business_only": 2,
+      "problem_rows": 1,
+      "rows": 5,
+      "signal_hits": 3,
+      "status_counts": {
+        "match_whois": 3,
+        "ok_no_match": 1,
+        "request_error": 1
+      }
+    }
+  }
+}
