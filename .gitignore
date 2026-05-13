@@ -1,38 +1,36 @@
-# Data files (too large for git, store separately)
-*.csv
-data/*.csv
-**/kc_*.csv
-**/seattle_leads*/**
-**/trillium_hubspot_leads*
-**/trillium_focused_leads*
-**/trillium_tracking/**
-
-# OS files
-.DS_Store
-Thumbs.db
-
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual env
 .venv/
 venv/
+
+# Environment
+.env
+.env.local
+
+# Data files (generated)
+data/
+*.csv
+*.xlsx
+*.json
+!tests/fixtures/
+
+# OS
+.DS_Store
+Thumbs.db
 
 # IDE
 .vscode/
 .idea/
 *.swp
 
-# Pipeline outputs (regenerated on each run)
-scripts/test_data/output/
-scripts/waterfall_outputs/
-scripts/output*/
-scripts/daily_output*/
-scripts/state*/
-
-# Secrets
-.env
-*.env
-scripts/.env
-scripts/local_secrets.py
-scripts/*secrets*.py
-*.key
+# Logs
+*.log
