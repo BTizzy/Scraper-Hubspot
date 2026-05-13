@@ -34,3 +34,23 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Output data (PII - emails, names, phone numbers)
+scripts/output_*/
+scripts/daily_output_*/
+scripts/output_*/
+scripts/state_sim*/
+scripts/rejects.csv
+scripts/*/seen_emails.csv
+scripts/*/contacts_*.csv
+scripts/*/hubspot_import*.csv
+scripts/*/companies_*.csv
+kc_*_*.csv
+trillium_*.csv
+*_leads_*.csv
+seattle_leads_*/
+kc_business_leads/
+kc_free_100/
+kc_leads_batch50/
+test_output/
+trillium_tracking/
